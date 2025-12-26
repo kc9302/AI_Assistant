@@ -1,0 +1,30 @@
+{
+  "updated_at": "2025-12-26T17:44:40.613014",
+  "messages": [
+    {
+      "type": "human",
+      "data": {
+        "content": "Hello",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": null
+      }
+    },
+    {
+      "type": "ai",
+      "data": {
+        "content": "Hi there!",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "ai",
+        "name": null,
+        "id": null,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    }
+  ]
+}
