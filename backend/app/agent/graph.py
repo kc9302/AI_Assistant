@@ -16,6 +16,7 @@ from app.tools.calendar import (
     _get_selected_calendars
 )
 from app.tools.memory_tools import memory_tools
+from app.tools.travel_tools import travel_tools
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ tools = [
     list_weekly_events,
     create_event,
     delete_event
-] + memory_tools
+] + memory_tools + travel_tools
 
 from langchain_core.output_parsers import PydanticOutputParser
 from app.agent.schemas import PlannerResponse, ExecutorResponse, RouterResponse
@@ -168,15 +169,23 @@ LONG-TERM KNOWLEDGE:
 - User Facts: {json.dumps(facts, ensure_ascii=False)}
 - Past Conversations (Summaries): {json.dumps(profile.get("history", []), ensure_ascii=False)}
 
-SELECTIVE MEMORY RETRIEVAL RULES:
-1. If the current request requires specific details from a past conversation listed above (e.g., "What was the name of the place we talked about?"), set 'mode': 'execute' and call 'retrieve_past_session' with the corresponding 'thread_id'.
-2. If the 'User Facts' or 'Past Conversations' summaries already provide enough context, do NOT call 'retrieve_past_session'. Just use the available info.
-3. NEVER fetch multiple sessions at once unless absolutely necessary.
+SELECTIVE MEMORY & KNOWLEDGE RETRIEVAL RULES:
+1. If the request is about your upcoming Osaka trip and the current context lacks details (e.g., flight times, hotel names, specific itinerary), use 'execute' and call 'search_travel_info'.
+2. If the request requires specific details from a past conversation (e.g., "What was the name of the place we talked about?"), set 'mode': 'execute' and call 'retrieve_past_session'.
+3. If 'User Facts', 'Past Conversations' summaries, or search results already provide enough context, do NOT call tools. Just respond.
+4. Use 'search_travel_info' for external travel documents, and 'retrieve_past_session' for specific past chats.
+
+EXAMPLES OF SEARCH DECISIONS:
+- User: "When is my flight to Osaka?" -> Mode: 'execute', Tool: 'search_travel_info', Intent: "Check flight schedule to Osaka"
+- User: "Where is my hotel?" -> Mode: 'execute', Tool: 'search_travel_info', Intent: "Check hotel address in Osaka"
+- User: "What did we say about the budget last time?" -> Mode: 'execute', Tool: 'retrieve_past_session', Intent: "Fetch previous chat about budget"
+- User: "Hi there!" -> Mode: 'plan', message: "Hello! How can I help you today?"
 """
     # If we have tool results, the planner must likely summarize (mode='plan')
     if last_tool_msg:
         tool_data = str(last_tool_msg.content)
-        system_prompt += f"\n\nCRITICAL: A tool was just executed with the following result:\n{tool_data}\n\nYou MUST summarize this result for the user in the 'assistant_message' field."
+        logger.info(f"Planner received tool result ({len(tool_data)} chars).")
+        system_prompt += f"\n\nCRITICAL: A tool was just executed with the following result:\n{tool_data}\n\nINSTRUCTION: The answer is likely in the text above. READ CAREFULLY. Use 'mode': 'plan' and summarize the information for the user immediately. DO NOT call the same tool again with the same query."
     
     # Repeat language rule at the very bottom with more force
     system_prompt += "\n\nFINAL COMMAND: Ensure 'language' matches the user's language and 'assistant_message' is in THAT language."
@@ -204,6 +213,16 @@ SELECTIVE MEMORY RETRIEVAL RULES:
         if last_tool_msg and parsed.mode == "execute":
              logger.warn("Model attempted to execute again immediately after tool call. Forcing 'plan' mode to avoid loop.")
              parsed.mode = "plan"
+             
+             # If assistant_message is generic or still says "Searching...", try to force a summary
+             if any(x in parsed.assistant_message.lower() for x in ["검색", "확인", "search", "check"]):
+                 summary_prompt = [
+                     SystemMessage(content="You previously tried to search but we are in a loop. Summarize the following tool result for the user in natural language. DO NOT OUTPUT JSON. Answer directly to the user."),
+                     HumanMessage(content=f"Tool result to summarize: {str(last_tool_msg.content)}")
+                 ]
+                 summary_res = get_llm().invoke(summary_prompt)
+                 parsed.assistant_message = summary_res.content
+                 logger.info(f"Forced natural summary generated: {parsed.assistant_message[:100]}...")
 
         logger.info(f"Planner complete in {time.time()-start_t:.2f}s. Mode: {parsed.mode}")
         logger.info(f"Final AI Response (Planner): {parsed.assistant_message}")
@@ -269,53 +288,19 @@ Intent: {intent}
 
     context_str = f"User Context: {facts}\n\nCalendar Name to ID Mapping: {json.dumps(calendar_name_to_id_map, ensure_ascii=False)}" + recent_events_str
 
-    def try_execute(use_local=True):
-        if use_local:
-            from app.agent.llm import get_local_llm
-            llm = get_local_llm()
-            prompt = FunctionGemmaPromptBuilder.build_chat_prompt(
-                user_input=intent,
-                time_str=time_str,
-                context=context_str
-            )
-            label = "Local Executor (270M)"
-        else:
-            llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER).with_structured_output(ExecutorResponse)
-            prompt = [SystemMessage(content=system_prompt), HumanMessage(content=f"Follow intent: {intent}")]
-            label = "Remote Executor (Fallback - Structured)"
-
-        if not llm: return None
-
-        logger.info(f"Invoking {label}...")
-        try:
-            if use_local:
-                response = llm.invoke(prompt)
-                content = extract_json(response)
-                # Parse with pydantic
-                try:
-                    parsed = base_executor_parser.parse(content)
-                    
-                    # Heuristic check: Did local 27x model call 'list' when we wanted 'create/delete'?
-                    mutation_keywords = ["등록", "추가", "생성", "삭제", "create", "delete", "add", "remove"]
-                    is_mutation_intent = any(k in intent.lower() for k in mutation_keywords)
-                    is_list_tool = "list" in parsed.proposed_action.tool
-                    
-                    if is_mutation_intent and is_list_tool:
-                        logger.warn(f"Intent-Tool Mismatch detected in Local Executor: intent={intent}, tool={parsed.proposed_action.tool}. Falling back to remote.")
-                        return None
-                        
-                    return parsed
-                except Exception as parse_err:
-                    # If local failed to produce valid JSON, fallback to remote
-                    logger.warn(f"Local Executor parse failed, falling back to remote: {parse_err}")
-                    return None
-            else:
-                return llm.invoke(prompt)
-        except Exception as e:
-            logger.warn(f"{label} failed: {e}")
-            return None
-
-    parsed = try_execute(use_local=False)
+    llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER).with_structured_output(ExecutorResponse)
+    prompt = [SystemMessage(content=system_prompt), HumanMessage(content=f"Follow intent: {intent}")]
+    
+    logger.info("Invoking Remote Executor (27B) - Structured Output...")
+    try:
+        parsed = llm.invoke(prompt)
+        logger.info(f"Executor Decision: {parsed.proposed_action.tool}({parsed.proposed_action.args})")
+        # The original code had a return here, but the guardrails and toolcall creation were after it.
+        # This implies the return was meant to be after the guardrails.
+        # I will keep the guardrails and toolcall creation, and move the return to the end of the function.
+    except Exception as e:
+        logger.error(f"Executor failed: {e}")
+        return {"messages": [AIMessage(content=f"Tool execution failed: {e}")], "mode": "plan"}
 
     if parsed:
         # --- GUARDRAIL: Fix ID Hallucination (Calendar ID vs Event ID) ---
