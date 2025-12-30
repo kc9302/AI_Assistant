@@ -19,7 +19,7 @@ class MemoryService:
         os.makedirs(SESSIONS_DIR, exist_ok=True)
         if not os.path.exists(USER_PROFILE_PATH):
             with open(USER_PROFILE_PATH, "w", encoding="utf-8") as f:
-                json.dump({"patterns": [], "facts": {}}, f)
+                json.dump({"patterns": [], "facts": {}, "history": []}, f)
 
     def save_session(self, thread_id: str, messages: List[BaseMessage]):
         """Saves current session messages to JSON in date-based directory."""
@@ -99,17 +99,48 @@ class MemoryService:
                 return json.load(f)
         except Exception as e:
             logger.error(f"Failed to load user profile: {e}")
-            return {"patterns": [], "facts": {}}
+            return {"patterns": [], "facts": {}, "history": []}
 
     def update_user_profile(self, new_facts: Dict[str, Any]):
-        """Updates the persistent user profile."""
+        """Updates the persistent user profile facts."""
         profile = self.get_user_profile()
+        if "facts" not in profile:
+            profile["facts"] = {}
         profile["facts"].update(new_facts)
+        self._save_profile(profile)
+
+    def add_session_summary(self, thread_id: str, category: str, summary: str):
+        """Adds or updates a session summary in the user profile history."""
+        profile = self.get_user_profile()
+        if "history" not in profile:
+            profile["history"] = []
+        
+        # Check if thread already exists in history to update it
+        existing = next((item for item in profile["history"] if item["thread_id"] == thread_id), None)
+        if existing:
+            existing.update({
+                "category": category,
+                "summary": summary,
+                "updated_at": datetime.now().isoformat()
+            })
+        else:
+            profile["history"].append({
+                "thread_id": thread_id,
+                "category": category,
+                "summary": summary,
+                "updated_at": datetime.now().isoformat()
+            })
+        
+        # Keep only last 20 summaries to save tokens later
+        profile["history"] = profile["history"][-20:]
+        self._save_profile(profile)
+
+    def _save_profile(self, profile: Dict[str, Any]):
         try:
             with open(USER_PROFILE_PATH, "w", encoding="utf-8") as f:
                 json.dump(profile, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.error(f"Failed to update user profile: {e}")
+            logger.error(f"Failed to save user profile: {e}")
 
 class MemoryAnalyzer:
     """Extracts patterns and facts from conversation history."""
@@ -136,34 +167,56 @@ class MemoryAnalyzer:
         
         llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER)
         
-        prompt = f"""You are a Fact Extractor. Analyze the following conversation and extract NEW, IMPORTANT facts or preferences about the user.
-Ignore trivial logs or temporary variables. Focus on long-term utility.
-
-Facts to look for:
-- User's name, hobbies, work, family.
-- Specific preferences (e.g., "likes morning meetings", "dislikes Friday evenings").
-- Recurring locations or people.
+        prompt = f"""You are a Fact Extractor & Conversation Summarizer. 
+Analyze the following conversation and extract:
+1. NEW, IMPORTANT facts or preferences about the user.
+2. A category for this conversation (e.g., 'Work', 'Health', 'Personal', 'General').
+3. A concise one-line summary of the conversation.
 
 Current conversation:
 {history}
 
-Respond ONLY in JSON format with a 'facts' key containing a dictionary of key-value strings. 
-Example: {{"facts": {{"favorite_sport": "tennis", "work_location": "Sinsa-dong"}}}}
-If no new facts found, respond with {{"facts": {{}}}}
+Respond ONLY in JSON format with the following keys:
+- 'facts': dictionary of key-value strings.
+- 'category': string.
+- 'summary': string.
+
+Example: {{
+  "facts": {{"favorite_sport": "tennis"}},
+  "category": "Interests",
+  "summary": "User shared their love for tennis and morning routines."
+}}
+If no new facts found, 'facts' should be {{}}.
 """
         try:
-            # Run LLM in thread to avoid blocking if needed, but since this is already an async background task, invoke is fine.
-            # If get_llm returns a synchronous LangChain, we wrap it.
+            # Run LLM in thread to avoid blocking
             response = await asyncio.to_thread(llm.invoke, prompt)
             json_str = extract_json(response.content)
             data = json.loads(json_str)
+            
             new_facts = data.get("facts", {})
+            category = data.get("category", "General")
+            summary = data.get("summary", "Conversation snapshot")
+            
+            # Use specific thread_id if available from message context or pass as arg
+            # For background tasks, we usually have a way to know which thread it was.
+            # We'll assume the caller of analyze_and_update can provide it or we find it.
+            # For now, let's add an optional thread_id to the method. (Refactoring for this below)
+            # Find the thread_id from the last AI message if possible
+            thread_id = "unknown"
+            for m in reversed(messages):
+                if hasattr(m, "additional_kwargs") and "thread_id" in m.additional_kwargs:
+                    thread_id = m.additional_kwargs["thread_id"]
+                    break
             
             if new_facts:
                 logger.info(f"MemoryAnalyzer: Discovered new facts: {new_facts}")
                 self.service.update_user_profile(new_facts)
-            else:
-                logger.debug("MemoryAnalyzer: No new facts discovered.")
+            
+            # Save session-specific metadata
+            self.service.add_session_summary(thread_id, category, summary)
+            logger.info(f"MemoryAnalyzer: Session [{thread_id}] summarized: {category} - {summary}")
+            
         except Exception as e:
             logger.error(f"MemoryAnalyzer: Analysis failed: {e}")
 

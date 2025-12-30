@@ -10,8 +10,6 @@ class Settings(BaseSettings):
     OLLAMA_HOST: str
     OLLAMA_MODEL: str = "gemma3:27b"
     OLLAMA_MODEL_PLANNER: str = "gemma3:27b"
-    OLLAMA_MODEL_EXECUTOR: str = "functiongemma:ondevice"
-    OLLAMA_MODEL_EXECUTOR_PATH: str = "ondevice/functiongemma-270m-it-q8_0.gguf"
     OLLAMA_KEEP_ALIVE: str = "0" # Unload immediately after use
     
     # App

@@ -1,4 +1,5 @@
 from langgraph.graph import StateGraph, END
+import logging
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import ToolNode
 from app.agent.state import AgentState
@@ -14,8 +15,7 @@ from app.tools.calendar import (
     delete_event,
     _get_selected_calendars
 )
-import logging
-from app.agent.prompts import FunctionGemmaPromptBuilder
+from app.tools.memory_tools import memory_tools
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ tools = [
     list_weekly_events,
     create_event,
     delete_event
-]
+] + memory_tools
 
 from langchain_core.output_parsers import PydanticOutputParser
 from app.agent.schemas import PlannerResponse, ExecutorResponse, RouterResponse
@@ -86,64 +86,42 @@ def router_node(state: AgentState):
     messages = state["messages"]
     last_user_message = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
     
-    system_prompt = f"""You are a Router. Categorize the user request into 'simple', 'complex', or 'answer'.
+    system_prompt = f"""You are an AI Assistant Router. Categorize the user request into 'simple', 'complex', or 'answer'.
 {time_str}
 {context_str}
 
 Respond ONLY in JSON. {base_router_parser.get_format_instructions()}
 
+- 'answer': General chat, greetings, questions about yourself, or questions that can be answered directly using 'User Facts' or 'Past Conversations'.
+- 'simple': A single, clear calendar action (e.g., "Add meeting", "List events").
+- 'complex': Requests requiring reasoning, multi-step actions, or searching deep into past session details.
+
 Example 1: "Hi" -> {{"mode": "answer", "reasoning": "Simple greeting"}}
-Example 2: "Create a meeting tomorrow at 3pm" -> {{"mode": "simple", "reasoning": "Single tool call without complex constraints"}}
-Example 3: "Check my schedule for next week and find a 1h slot for tennis" -> {{"mode": "complex", "reasoning": "Requires reasoning, schedule analysis, and decision making"}}
-Example 4: "내 캘린더 목록 보여줘" -> {{"mode": "simple", "reasoning": "캘린더 목록을 조회하는 단일 도구 호출"}}
+Example 2: "내 이름이 뭐야?" -> {{"mode": "answer", "reasoning": "Asking about personal info already in context"}}
+Example 3: "Create a meeting tomorrow at 3pm" -> {{"mode": "simple", "reasoning": "Single tool call"}}
+Example 4: "Check my schedule for next week and find a 1h slot for tennis" -> {{"mode": "complex", "reasoning": "Requires schedule analysis"}}
 """
 
-    def try_route(use_local=True):
-        if use_local:
-            from app.agent.llm import get_local_llm
-            llm = get_local_llm()
-            prompt = FunctionGemmaPromptBuilder.build_router_prompt(
-                user_input=last_user_message,
-                time_str=time_str,
-                context=context_str
-            )
-            label = "Local Router (270M)"
-        else:
-            llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER)
-            prompt = [SystemMessage(content=system_prompt), HumanMessage(content=last_user_message)]
-            label = "Remote Router (27B Fallback)"
-
-        if not llm: return None
-        
-        logger.info(f"Invoking {label}...")
-        start_t = time.time()
-        try:
-            response = llm.invoke(prompt)
-            content = response if isinstance(response, str) else response.content
-            logger.debug(f"Raw {label} Output: {content}")
-            json_str = extract_json(content)
-            
-            try:
-                parsed = base_router_parser.parse(json_str)
-            except Exception as parse_err:
-                if not use_local: # If remote also failed, try to fix it
-                    parsed = fix_json_with_llm(json_str, str(parse_err), base_router_parser)
-                else:
-                    raise parse_err
-                    
-            logger.info(f"{label} Decision: {parsed.mode} in {time.time()-start_t:.2f}s")
-            return parsed
-        except Exception as e:
-            logger.warn(f"{label} failed: {e}")
-            return None
-
-    # Try Remote only
-    result = try_route(use_local=False)
+    llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER)
+    prompt = [SystemMessage(content=system_prompt), HumanMessage(content=last_user_message)]
     
-    if result:
-        return {"router_mode": result.mode}
-    else:
-        logger.error("All routing attempts failed.")
+    logger.info("Invoking Router (27B)...")
+    start_t = time.time()
+    try:
+        response = llm.invoke(prompt)
+        content = response.content
+        logger.debug(f"Raw Router Output: {content}")
+        json_str = extract_json(content)
+        
+        try:
+            parsed = base_router_parser.parse(json_str)
+        except Exception as parse_err:
+            parsed = fix_json_with_llm(json_str, str(parse_err), base_router_parser)
+                
+        logger.info(f"Router Decision: {parsed.mode} in {time.time()-start_t:.2f}s")
+        return {"router_mode": parsed.mode}
+    except Exception as e:
+        logger.error(f"Routing failed: {e}")
         return {"router_mode": "complex"}
 
 def planner(state: AgentState):
@@ -168,13 +146,16 @@ def planner(state: AgentState):
     remote_llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER)
     structured_llm = remote_llm.with_structured_output(PlannerResponse)
     
-    system_prompt = f"""You are a Calendar Agent Planner. 
+    system_prompt = f"""You are a Versatile AI Assistant Planner. 
 {time_str}
 {context_str}
 
-Analyze the conversation and determine if you need to:
-1. 'plan': Ask for info or summarize tool results.
-2. 'execute': Perform a calendar action.
+Analyze the conversation and determine the next step:
+1. 'plan': Respond directly to the user (chat, greeting, answering from 'User Facts'/'Past Conversations') or ask for missing information.
+2. 'execute': Perform a specific tool action (calendar operations or retrieving detailed session history).
+
+Use 'plan' if you can answer the user's question directly using the provided 'User Facts' or 'Past Conversations' summaries.
+Only use 'execute' if you strictly need a tool to fulfill the request.
 
 Available tools: {[t.name for t in tools]}
 
@@ -182,6 +163,15 @@ LANGUAGE RULES:
 - If the user's latest query is in Korean, you MUST set 'language': 'ko' and respond in Korean.
 - If the user's latest query is in English, you MUST set 'language': 'en' and respond in English.
 - This applies STRICTLY to the 'assistant_message' field.
+
+LONG-TERM KNOWLEDGE:
+- User Facts: {json.dumps(facts, ensure_ascii=False)}
+- Past Conversations (Summaries): {json.dumps(profile.get("history", []), ensure_ascii=False)}
+
+SELECTIVE MEMORY RETRIEVAL RULES:
+1. If the current request requires specific details from a past conversation listed above (e.g., "What was the name of the place we talked about?"), set 'mode': 'execute' and call 'retrieve_past_session' with the corresponding 'thread_id'.
+2. If the 'User Facts' or 'Past Conversations' summaries already provide enough context, do NOT call 'retrieve_past_session'. Just use the available info.
+3. NEVER fetch multiple sessions at once unless absolutely necessary.
 """
     # If we have tool results, the planner must likely summarize (mode='plan')
     if last_tool_msg:

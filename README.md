@@ -34,34 +34,32 @@
 
 ## 전체 시스템 아키텍처 (System Architecture)
 
-본 서비스는 온디바이스 추론과 고성능 클라우드 추론이 결합된 하위브리드 구조를 가집니다.
+본 서비스는 고성능 LLM 기반의 에이전트 엔진과 캘린더 API가 결합된 구조를 가집니다.
 
 ```mermaid
 graph TB
     subgraph Client ["Flutter Frontend (Client)"]
-        UI[Flutter UI]
-        Prov[State Provider]
-        LocalLLM[MediaPipe local LLM - 270M]
+        UI["Flutter UI"]
+        Prov["State Provider"]
         UI <--> Prov
-        Prov -.-> LocalLLM
     end
 
     subgraph Backend ["FastAPI Backend (Python)"]
-        API[API Endpoints]
+        API["API Endpoints"]
         
         subgraph Agent ["LangGraph Agent Engine"]
-            Router{Hybrid Router}
-            Planner[Planner - Gemma 27B]
-            Executor[Executor - Tool Caller]
+            Router{Remote Router}
+            Planner["Planner - Gemma 27B"]
+            Executor["Executor - Tool Caller"]
             Router --> Planner
             Router --> Executor
             Planner --> Executor
         end
         
         subgraph Storage ["Memory & Persistence"]
-            DB[(SQLite - Checkpoints)]
-            Sess[Session Snapshots]
-            Profile[User Profile - JSON]
+            DB[("SQLite - Checkpoints")]
+            Sess["Session Snapshots"]
+            Profile["User Profile - JSON"]
         end
 
         API <--> Agent
@@ -69,8 +67,8 @@ graph TB
     end
 
     subgraph Infrastructure ["External Services"]
-        Ollama[Ollama Server - Gemma3 27B/4B]
-        GCal[Google Calendar API]
+        Ollama["Ollama Server - Gemma3 27B"]
+        GCal["Google Calendar API"]
     end
 
     Prov <--> API
@@ -122,17 +120,17 @@ graph TB
 ### 2. 장기 기억 분석 프로세스 다이어그램
 ```mermaid
 graph TD
-    User([사용자 입력]) --> Graph[LangGraph 에이전트 실행]
-    Graph --> Respond[클라이언트에 즉시 응답]
-    Graph --> Background[백그라운드 분석 시작]
+    User(["사용자 입력"]) --> Graph["LangGraph 에이전트 실행"]
+    Graph --> Respond["클라이언트에 즉시 응답"]
+    Graph --> Background["백그라운드 분석 시작"]
     
     subgraph "Long-term Memory Analysis"
-    Background --> Analyzer[MemoryAnalyzer]
-    Analyzer --> Extraction[Gemma 27B: 유의미한 사실 추출]
-    Extraction --> Storage[(user_profile.json)]
+    Background --> Analyzer["MemoryAnalyzer"]
+    Analyzer --> Extraction["Gemma 27B: 유의미한 사실 추출"]
+    Extraction --> Storage[("user_profile.json")]
     end
     
-    Storage -.-> Prompt[다음 대화 시 시스템 프롬프트에 자동 주입]
+    Storage -.-> Prompt["다음 대화 시 시스템 프롬프트에 자동 주입"]
     Prompt --> Graph
     
     style Background fill:#f9f,stroke:#333,stroke-width:2px
@@ -266,6 +264,21 @@ pytest tests\unit\
 - ✅ **Phase 6**: 코드 품질 개선 및 린트 최적화 (완료)
 
 
+
 **현재 버전**: 1.0.0 (Stable)  
 **최근 업데이트**: 2025-12-30
+
+---
+
+## 모델 성능 평가 이력 (Model Evaluation History)
+
+### Local Router (FunctionGemma-270M) 성능 평가 (2025-12-30)
+초기 설계된 온디바이스 하이브리드 라우팅의 실효성을 검증하기 위해 벤치마크를 수행했습니다.
+
+- **테스트 환경**: Local LlamaCpp (functiongemma-270m-it-q8_0.gguf)
+- **평가 항목**: 의도 분류 (answer, simple, complex)
+- **결과 요약**:
+  - **정확도 (Accuracy)**: **14.3% (1/7)**
+  - **주요 결함**: 자연어 의도 파악 오류, JSON 출력 형식 불완전, 복잡한 문장 해석 불가.
+- **결정**: 로컬 모델의 낮은 신뢰도로 인해 사용자 경험을 해칠 수 있다고 판단, 온디바이스 라우팅 로직을 모두 제거하고 고성능 리모트 모델(Gemma3:27b)로 단일화함.
 
