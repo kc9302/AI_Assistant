@@ -99,7 +99,6 @@ graph TB
 │       ├── checkpoints.db   # LangGraph 세션 상태 DB
 │       ├── context_v3.db    # 단기 작업 컨텍스트 DB
 │       └── user_profile.json # 지능형 장기 기억 (User Facts) 데이터베이스
-```
 ├── client/                  # Flutter 클라이언트 (Frontend)
 │   ├── lib/
 │   │   ├── presentation/    # UI 컴포넌트 및 Provider
