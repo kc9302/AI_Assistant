@@ -1,6 +1,3 @@
-import 'package:flutter/material.dart';
-import 'package:client/domain/entities/chat_message.dart';
-import 'package:client/domain/repositories/hybrid_router.dart';
 import 'package:client/presentation/providers/chat_provider.dart';
 
 class MockChatProvider extends ChatProvider {

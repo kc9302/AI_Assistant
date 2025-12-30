@@ -1,5 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response
+import time
+import json
 from contextlib import asynccontextmanager # Import asynccontextmanager
 from app.core.settings import settings
 from app.core.logging import setup_logging
@@ -30,6 +33,48 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Request/Response Logging Middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    
+    # Read request body
+    body = await request.body()
+    # Replace body in request so it can be read again by the actual route
+    async def receive():
+        return {"type": "http.request", "body": body}
+    request._receive = receive
+
+    # Log request
+    try:
+        if body:
+            parsed_body = json.loads(body)
+            logger.info(f">>> REQUEST: {request.method} {request.url.path} Body: {json.dumps(parsed_body, ensure_ascii=False)}")
+        else:
+            logger.info(f">>> REQUEST: {request.method} {request.url.path} (No Body)")
+    except Exception:
+        logger.info(f">>> REQUEST: {request.method} {request.url.path} (Body Binary/Raw: {len(body)} bytes)")
+
+    response = await call_next(request)
+    
+    # Capture response body
+    response_body = b""
+    async for chunk in response.body_iterator:
+        response_body += chunk
+    
+    # Log response
+    duration = time.time() - start_time
+    try:
+        if response_body:
+            parsed_res = json.loads(response_body)
+            logger.info(f"<<< RESPONSE: {response.status_code} ({duration:.2f}s) Body: {json.dumps(parsed_res, ensure_ascii=False)}")
+        else:
+            logger.info(f"<<< RESPONSE: {response.status_code} ({duration:.2f}s) (No Body)")
+    except Exception:
+        logger.info(f"<<< RESPONSE: {response.status_code} ({duration:.2f}s) (Body Binary/Raw: {len(response_body)} bytes)")
+
+    return Response(content=response_body, status_code=response.status_code, headers=dict(response.headers), media_type=response.media_type)
 
 @app.get("/")
 def read_root():

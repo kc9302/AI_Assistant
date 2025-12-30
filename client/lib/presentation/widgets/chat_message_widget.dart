@@ -5,7 +5,7 @@ import 'package:client/domain/entities/chat_message.dart';
 class ChatMessageWidget extends StatelessWidget {
   final ChatMessage message;
 
-  const ChatMessageWidget({Key? key, required this.message}) : super(key: key);
+  const ChatMessageWidget({super.key, required this.message});
 
   @override
   Widget build(BuildContext context) {
@@ -40,7 +40,7 @@ class ChatMessageWidget extends StatelessWidget {
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
                       color: theme.colorScheme.surfaceContainerHighest
-                          .withOpacity(0.3),
+                          .withValues(alpha: 0.3),
                       borderRadius: const BorderRadius.only(
                         topRight: Radius.circular(12),
                         bottomLeft: Radius.circular(12),

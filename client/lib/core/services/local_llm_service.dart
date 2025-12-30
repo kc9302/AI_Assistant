@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 class LocalLLMService {
   bool _isLoaded = false;
   // LlmInference? _engine; // Uncomment when package is available
@@ -11,7 +13,7 @@ class LocalLLMService {
       // or a different library like llama_cpp_dart.
       // However, we prepare the logic assuming the file is accessible.
 
-      print("Loading model from asset: $modelPath");
+      debugPrint("Loading model from asset: $modelPath");
 
       // _engine = await LlmInference.createFromOptions(
       //   LlmInferenceOptions(
@@ -25,9 +27,9 @@ class LocalLLMService {
       await Future.delayed(const Duration(seconds: 1));
 
       _isLoaded = true;
-      print("Model loaded successfully: $_isLoaded");
+      debugPrint("Model loaded successfully: $_isLoaded");
     } catch (e) {
-      print("Failed to load model: $e");
+      debugPrint("Failed to load model: $e");
       _isLoaded = false;
       rethrow;
     }

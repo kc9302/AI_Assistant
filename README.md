@@ -6,11 +6,11 @@
 
 - ✅ **LangGraph 기반 대화형 AI**: 로컬(270M) 및 서버(27B) 모델을 유기적으로 활용하는 하이브리드 추론 엔진
 - ✅ **Google 캘린더 지능형 연동**: 자연어를 통한 일정 조회, 생성, 삭제 및 다중 캘린더 지원
-- ✅ **강력한 메모리 시스템**: 
+- ✅ **지능형 하이브리드 메모리 시스템**: 
   - **세션 영속성 (Persistence)**: SqliteSaver 기반의 multi-turn 대화 상태 자동 저장 및 복구
   - **세션 스냅샷 (관리 기능)**: 모든 대화 기록을 `data/sessions/YYYY-MM-DD/` 폴더에 일자별로 자동 백업하여 관리 편의성 제공
   - **단기 컨텍스트 (ContextManager)**: 최근 작업물(ID, 제목 등)을 추적하여 "방금 잡은 일정 취소해줘"와 같은 지칭어 처리 지원
-  - **사용자 프로필 시스템**: 대화 중 중요한 사실(User Facts)을 추출하여 향후 응답에 반영
+  - **장기 기억 분석 (Memory Analysis)**: 대화 종료 후 **백그라운드에서 AI가 대화 내용을 자동 분석**하여 사용자의 선호도, 직업, 중요 인물 등 핵심 사실(Facts)을 `user_profile.json`에 영구 저장. 다음 대화 시 이 프로필이 시스템 프롬프트에 자동으로 주입되어 개인화된 응답 구현
 - ✅ **견고한 가드레일 (Guardrails)**: 
   - **ID 홀루시네이션 방지**: 캘린더 ID와 이벤트 ID의 혼동을 자동으로 감지하고 컨텍스트 기반으로 교정
   - **ID 절단(Truncation) 수정**: 응답 중 잘린 캘린더 ID(@group... 이후 누락 등)를 원본 맵과 대조하여 자동 복구
@@ -32,6 +32,57 @@
 - **Ollama** (LLM Server, Gemma3:27b / 4b)
 - **Sqlite3** (Session Checkpoints & Context Store)
 
+## 전체 시스템 아키텍처 (System Architecture)
+
+본 서비스는 온디바이스 추론과 고성능 클라우드 추론이 결합된 하위브리드 구조를 가집니다.
+
+```mermaid
+graph TB
+    subgraph Client ["Flutter Frontend (Client)"]
+        UI[Flutter UI]
+        Prov[State Provider]
+        LocalLLM[MediaPipe local LLM - 270M]
+        UI <--> Prov
+        Prov -.-> LocalLLM
+    end
+
+    subgraph Backend ["FastAPI Backend (Python)"]
+        API[API Endpoints]
+        
+        subgraph Agent ["LangGraph Agent Engine"]
+            Router{Hybrid Router}
+            Planner[Planner - Gemma 27B]
+            Executor[Executor - Tool Caller]
+            Router --> Planner
+            Router --> Executor
+            Planner --> Executor
+        end
+        
+        subgraph Storage ["Memory & Persistence"]
+            DB[(SQLite - Checkpoints)]
+            Sess[Session Snapshots]
+            Profile[User Profile - JSON]
+        end
+
+        API <--> Agent
+        Agent <--> Storage
+    end
+
+    subgraph Infrastructure ["External Services"]
+        Ollama[Ollama Server - Gemma3 27B/4B]
+        GCal[Google Calendar API]
+    end
+
+    Prov <--> API
+    Agent <--> Ollama
+    Agent <--> GCal
+
+    style Client fill:#e1f5fe,stroke:#01579b
+    style Backend fill:#f3e5f5,stroke:#4a148c
+    style Infrastructure fill:#fff3e0,stroke:#e65100
+    style Agent fill:#e8f5e9,stroke:#1b5e20
+```
+
 ## 프로젝트 구조
 
 ```
@@ -48,7 +99,8 @@
 │   └── data/                # 로컬 데이터베이스 및 세션 저장소
 │       ├── sessions/        # 일자별 대화 기록 스냅샷 (YYYY-MM-DD/ 형식)
 │       ├── checkpoints.db   # LangGraph 세션 상태 DB
-│       └── context_v3.db    # 단기 작업 컨텍스트 DB
+│       ├── context_v3.db    # 단기 작업 컨텍스트 DB
+│       └── user_profile.json # 지능형 장기 기억 (User Facts) 데이터베이스
 ```
 ├── client/                  # Flutter 클라이언트 (Frontend)
 │   ├── lib/
@@ -57,6 +109,40 @@
 │   │   └── data/            # API 연동 및 데이터 처리
 │   └── assets/              # 로컬 LLM 모델(GGUF) 및 리소스
 ```
+
+## 지능형 하이브리드 메모리 아키텍처
+
+본 프로젝트는 단기 맥락 유지와 장기 개인화를 위해 설계된 **3단계 하이브리드 메모리 시스템**을 사용합니다.
+
+### 1. 3-Layer Memory 구조
+- **Layer 1: 실시간 상태 (LangGraph Checkpoints)**: 대화 중의 모든 이전 메시지를 추적하여 매끄러운 Multi-turn 대화를 지원합니다.
+- **Layer 2: 단기 작업 컨텍스트 (ContextManager)**: 최근 생성된 캘린더 이벤트 ID 등을 캐싱하여 "그거 취소해줘"와 같은 지칭어를 즉시 처리합니다.
+- **Layer 3: 장기 지능형 프로필 (User Profile Analysis)**: 대화 종료 후 비동기적으로 사용자의 핵심 정보를 추출하여 지식화합니다.
+
+### 2. 장기 기억 분석 프로세스 다이어그램
+```mermaid
+graph TD
+    User([사용자 입력]) --> Graph[LangGraph 에이전트 실행]
+    Graph --> Respond[클라이언트에 즉시 응답]
+    Graph --> Background[백그라운드 분석 시작]
+    
+    subgraph "Long-term Memory Analysis"
+    Background --> Analyzer[MemoryAnalyzer]
+    Analyzer --> Extraction[Gemma 27B: 유의미한 사실 추출]
+    Extraction --> Storage[(user_profile.json)]
+    end
+    
+    Storage -.-> Prompt[다음 대화 시 시스템 프롬프트에 자동 주입]
+    Prompt --> Graph
+    
+    style Background fill:#f9f,stroke:#333,stroke-width:2px
+    style Storage fill:#bbf,stroke:#333,stroke-width:4px
+```
+
+### 3. 데이터 흐름 상세
+- **추출(Extraction)**: 사용자가 "나는 목요일 오후에는 항상 운동을 해"라고 말하면, AI가 대화 종료 후 이를 감지하여 `{"weekly_routine": "Exercise on Thursday afternoon"}`으로 정형화합니다.
+- **보관(Persistence)**: 정형화된 데이터는 일시적인 세션이 끝나도 사라지지 않고 서버의 `data/user_profile.json`에 영구 보관됩니다.
+- **활용(Utilization)**: 다음 주에 "나 운동 갈 수 있어?"라고 물으면, AI는 캘린더 데이터뿐만 아니라 저장된 장기 기억을 바탕으로 "목요일 오후라 운동 시간이네요!"라고 개인화된 답변을 제공합니다.
 
 ## 시작하기
 
@@ -99,14 +185,29 @@ ollama pull gemma3:4b   # Router용 (빠른 반응속도)
 
 4. **Backend 실행**
    ```bash
+   # 가상환경 활성화 후 실행
+   .\venv\Scripts\activate
    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+   # 또는 한 줄로 실행
+   .\venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
    ```
 
 5. **Flutter 앱 실행**
    ```bash
    cd client
    flutter pub get
-   flutter run
+   
+   # 1. 사용할 수 있는 에뮬레이터 확인
+   flutter emulators
+   
+   # 2. 에뮬레이터 실행 (예: Pixel_9)
+   flutter emulators --launch Pixel_9
+   
+   # 3. 특정 디바이스로 앱 실행
+   flutter run -d chrome
+   flutter run -d windows
+   flutter run -d emulator-5554  # 실행된 에뮬레이터 ID
    ```
 
 ## 개발 및 테스트
@@ -141,18 +242,30 @@ pytest tests\unit\
 
 - **Q: "Google Token is invalid (invalid_grant)" 오류가 발생합니다.**
   - **A:** 보안 정책이나 만료로 인해 토큰이 무효화된 상태입니다. `backend` 폴더에서 `python scripts/reauth.py`를 실행하여 다시 로그인하세요.
-- **Q: 캘린더 일정이 조회되지 않거나 404/403 오류가 납니다.**
-  - **A:** Google Cloud 프로젝트에서 **Calendar API**가 활성화되어 있는지, 그리고 `credentials.json`에 필요한 권한(Scopes)이 포함되어 있는지 확인하세요.
+- **Q: 8000 포트가 이미 사용 중이라는 오류(`OSError: [WinError 10048]`)가 발생합니다.**
+  - **A:** 기존 서버 프로세스가 종료되지 않은 경우입니다. 아래 명령어로 해당 포트를 점유 중인 프로세스를 강제 종료하세요:
+    ```powershell
+    # Windows (PowerShell)
+    Stop-Process -Id (Get-NetTCPConnection -LocalPort 8000).OwningProcess -Force
+    
+    # Windows (CMD)
+    Get-NetTCPConnection -LocalPort 8000 | ForEach-Object {Stop-Process -Id $_.OwningProcess -Force}
+
+    ```
 - **Q: 응답 속도가 너무 느립니다.**
+
   - **A:** 시스템 사양에 따라 `OLLAMA_MODEL_PLANNER`를 `gemma3:4b` 등 더 가벼운 모델로 변경하여 테스트해 보세요.
 
 ## 진행 상황 및 로드맵
 
 - ✅ **Phase 1-3**: 기본 인프라, 캘린더 연동, 하이브리드 라우팅 (완료)
-- ✅ **Phase 4**: LangGraph 및 SQLite 기반 지능형 메모리 시스템 (완료)
+- ✅ **Phase 4**: LangGraph 및 SQLite 기반 지능형 메모리 & 장기 기억 분석 시스템 (완료)
 - ✅ **Phase 4.5**: ID 교정 가드레일 및 안정성 강화 (완료)
 - ✅ **Phase 4.6**: 일자별 세션 관리 및 인증 유틸리티 최적화 (완료)
-- ⬜ **Phase 5**: 배포 자동화 및 보안 강화 (진행 중)
+- ✅ **Phase 5**: 배포 자동화 및 보안 강화 (완료)
+- ✅ **Phase 6**: 코드 품질 개선 및 린트 최적화 (완료)
 
-**현재 버전**: 0.9.9 (Release Candidate)  
-**최근 업데이트**: 2025-12-26
+
+**현재 버전**: 1.0.0 (Stable)  
+**최근 업데이트**: 2025-12-30
+

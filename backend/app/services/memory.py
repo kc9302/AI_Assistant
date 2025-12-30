@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from langchain_core.messages import BaseMessage, message_to_dict, messages_from_dict
@@ -119,13 +120,54 @@ class MemoryAnalyzer:
     async def analyze_and_update(self, messages: List[BaseMessage]):
         """
         Background task to analyze conversation for long-term facts.
-        In a real app, this would use an LLM. Here, we'll simulate logic.
         """
-        # Example logic: if user mentions "I like morning meetings", extract it.
-        # This is where we'd call a small LLM to 'distill' the session.
         logger.info("MemoryAnalyzer: Running background analysis...")
-        # (Distillation logic would go here)
-        pass
+        
+        # 1. Prepare history text
+        history = ""
+        for m in messages:
+            role = "User" if isinstance(m, HumanMessage) else "Assistant"
+            history += f"{role}: {m.content}\n"
+
+        # 2. Extract facts using LLM
+        from app.agent.llm import get_llm
+        from app.core.settings import settings
+        from app.core.utils import extract_json
+        
+        llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER)
+        
+        prompt = f"""You are a Fact Extractor. Analyze the following conversation and extract NEW, IMPORTANT facts or preferences about the user.
+Ignore trivial logs or temporary variables. Focus on long-term utility.
+
+Facts to look for:
+- User's name, hobbies, work, family.
+- Specific preferences (e.g., "likes morning meetings", "dislikes Friday evenings").
+- Recurring locations or people.
+
+Current conversation:
+{history}
+
+Respond ONLY in JSON format with a 'facts' key containing a dictionary of key-value strings. 
+Example: {{"facts": {{"favorite_sport": "tennis", "work_location": "Sinsa-dong"}}}}
+If no new facts found, respond with {{"facts": {{}}}}
+"""
+        try:
+            # Run LLM in thread to avoid blocking if needed, but since this is already an async background task, invoke is fine.
+            # If get_llm returns a synchronous LangChain, we wrap it.
+            response = await asyncio.to_thread(llm.invoke, prompt)
+            json_str = extract_json(response.content)
+            data = json.loads(json_str)
+            new_facts = data.get("facts", {})
+            
+            if new_facts:
+                logger.info(f"MemoryAnalyzer: Discovered new facts: {new_facts}")
+                self.service.update_user_profile(new_facts)
+            else:
+                logger.debug("MemoryAnalyzer: No new facts discovered.")
+        except Exception as e:
+            logger.error(f"MemoryAnalyzer: Analysis failed: {e}")
+
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, message_to_dict, messages_from_dict
 
 memory_service = MemoryService()
 memory_analyzer = MemoryAnalyzer(memory_service)
