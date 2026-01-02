@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     
     # App
     PROJECT_NAME: str = "FunctionGemma Agent"
+    CHECKPOINT_DB_PATH: str = "data/checkpoints.db"
     
     model_config = ConfigDict( # Use model_config instead of Config class
         env_file = ".env",

@@ -1,3 +1,4 @@
+import asyncio
 from langgraph.graph import StateGraph, END
 import logging
 from langchain_core.messages import SystemMessage
@@ -427,7 +428,56 @@ def tool_with_logging(state: AgentState, config):
 
     return result
 
-def get_graph():
+def _build_checkpointer():
+    """Create a resilient, asyncio-friendly checkpointer for LangGraph."""
+
+    # Prefer SqliteSaver with a filesystem DB so checkpoints survive restarts,
+    # but provide async shims so `ainvoke` works without raising NotImplemented.
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        import sqlite3
+        from pathlib import Path
+
+        class AsyncCapableSqliteSaver(SqliteSaver):
+            """SqliteSaver with async helpers backed by threads."""
+
+            async def aget_tuple(self, config):
+                return await asyncio.to_thread(self.get_tuple, config)
+
+            async def alist(self, config, *, filter=None, before=None, limit=None):
+                rows = await asyncio.to_thread(
+                    lambda: list(super().list(config, filter=filter, before=before, limit=limit))
+                )
+                for row in rows:
+                    yield row
+
+            async def aput(self, config, checkpoint, metadata, new_versions):
+                return await asyncio.to_thread(
+                    super().put, config, checkpoint, metadata, new_versions
+                )
+
+            async def aput_writes(self, config, writes, task_id, task_path=""):
+                await asyncio.to_thread(super().put_writes, config, writes, task_id, task_path)
+
+            async def adelete_thread(self, thread_id):
+                await asyncio.to_thread(super().delete_thread, thread_id)
+
+        # Ensure parent directory exists
+        db_path = Path(settings.CHECKPOINT_DB_PATH)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        return AsyncCapableSqliteSaver(conn)
+    except Exception as exc:  # pragma: no cover - safety net
+        logger.warning(
+            "Falling back to in-memory LangGraph checkpointer: %s", exc,
+            exc_info=True,
+        )
+        from langgraph.checkpoint.memory import MemorySaver
+
+        return MemorySaver()
+    
+def get_graph(checkpointer=None):
     # Define the graph
     workflow = StateGraph(AgentState)
 
@@ -444,13 +494,12 @@ def get_graph():
     workflow.add_edge("tools", "planner") # After tool execution, go to planner for final response
 
     # Initialize Checkpointer
+    selected_checkpointer = checkpointer or _build_checkpointer()
     try:
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        import sqlite3
-        conn = sqlite3.connect("checkpoints.db", check_same_thread=False)
-        memory = SqliteSaver(conn)
-        graph = workflow.compile(checkpointer=memory)
-    except ImportError:
+        graph = workflow.compile(checkpointer=selected_checkpointer)
+    except TypeError:
+        # Older langgraph versions compiled without a checkpointer parameter
+        logger.warning("workflow.compile does not accept checkpointer; compiling without persistence")
         graph = workflow.compile()
     
     return graph

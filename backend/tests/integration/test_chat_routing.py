@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import MagicMock, patch
 from app.agent.graph import get_graph
 from langchain_core.messages import HumanMessage
+from app.agent.schemas import PlannerResponse
 
 class TestChatRouting(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -22,7 +23,7 @@ class TestChatRouting(unittest.IsolatedAsyncioTestCase):
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
 
-    @patch("app.agent.llm.get_llm")
+    @patch("app.agent.graph.get_llm")
     async def test_general_chat_no_tool_call(self, mock_get_llm):
         """Verify that general greetings or questions don't trigger tool calls unnecessarily."""
         # Force MemoryService to refresh its paths by re-initializing it or manually setting them
@@ -56,7 +57,7 @@ class TestChatRouting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["mode"], "plan")
         self.assertIn("Hello", result["messages"][-1].content)
 
-    @patch("app.agent.llm.get_llm")
+    @patch("app.agent.graph.get_llm")
     async def test_memory_question_no_tool_call(self, mock_get_llm):
         """Verify that questions about user facts are answered directly."""
         mock_llm = MagicMock()
@@ -69,6 +70,8 @@ class TestChatRouting(unittest.IsolatedAsyncioTestCase):
         with open(app.services.memory.USER_PROFILE_PATH, "w", encoding="utf-8") as f:
             json.dump({"facts": {"hobby": "Hiking"}, "history": []}, f)
         
+        mock_structured_llm = MagicMock()
+        mock_llm.with_structured_output.return_value = mock_structured_llm
         mock_structured_llm.invoke.return_value = PlannerResponse(
             mode="plan",
             assistant_message="I remember you enjoy hiking!",
