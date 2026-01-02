@@ -89,6 +89,7 @@ client/ios/Flutter/Flutter.framework
 client/ios/Flutter/Flutter.podspec
 client/.metadata
 client/.flutter_tool_state
+client/**/flutter/ephemeral/
 
 # Android specific
 client/android/.gradle/

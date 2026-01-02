@@ -45,6 +45,18 @@ from app.core.google_auth import get_calendar_service # Added import
 from app.services.context_manager import context_manager # Added import
 from app.core.utils import extract_json # Added import
 
+TRAVEL_ROUTER_HINTS = (
+    "비행", "항공", "항공편", "편명", "출발", "도착", "탑승", "예약번호",
+    "flight", "airline", "booking", "ticket",
+    "오사카", "간사이", "호텔", "숙소",
+)
+
+def is_travel_query(message: str) -> bool:
+    if not message:
+        return False
+    text = message.lower()
+    return any(hint in text for hint in TRAVEL_ROUTER_HINTS)
+
 def get_current_time_str():
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
@@ -121,6 +133,9 @@ Example 4: "Check my schedule for next week and find a 1h slot for tennis" -> {{
             parsed = fix_json_with_llm(json_str, str(parse_err), base_router_parser)
                 
         logger.info(f"Router Decision: {parsed.mode} in {time.time()-start_t:.2f}s")
+        if is_travel_query(last_user_message) and parsed.mode in ("answer", "simple"):
+            logger.info("Router override: travel query -> complex")
+            return {"router_mode": "complex"}
         return {"router_mode": parsed.mode}
     except Exception as e:
         logger.error(f"Routing failed: {e}")
@@ -384,6 +399,13 @@ def route_tools(state: AgentState):
     logger.info(f"Decision: Routing to END")
     return END
 
+def chatbot(state: AgentState):
+    """Simple LLM node that can emit tool calls for unit tests."""
+    llm = get_llm()
+    llm_with_tools = llm.bind_tools(tools)
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
+
 def tool_with_logging(state: AgentState, config):
     """Execution node for tools with result logging."""
     tool_node = ToolNode(tools)
@@ -428,56 +450,8 @@ def tool_with_logging(state: AgentState, config):
 
     return result
 
-def _build_checkpointer():
-    """Create a resilient, asyncio-friendly checkpointer for LangGraph."""
-
-    # Prefer SqliteSaver with a filesystem DB so checkpoints survive restarts,
-    # but provide async shims so `ainvoke` works without raising NotImplemented.
-    try:
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        import sqlite3
-        from pathlib import Path
-
-        class AsyncCapableSqliteSaver(SqliteSaver):
-            """SqliteSaver with async helpers backed by threads."""
-
-            async def aget_tuple(self, config):
-                return await asyncio.to_thread(self.get_tuple, config)
-
-            async def alist(self, config, *, filter=None, before=None, limit=None):
-                rows = await asyncio.to_thread(
-                    lambda: list(super().list(config, filter=filter, before=before, limit=limit))
-                )
-                for row in rows:
-                    yield row
-
-            async def aput(self, config, checkpoint, metadata, new_versions):
-                return await asyncio.to_thread(
-                    super().put, config, checkpoint, metadata, new_versions
-                )
-
-            async def aput_writes(self, config, writes, task_id, task_path=""):
-                await asyncio.to_thread(super().put_writes, config, writes, task_id, task_path)
-
-            async def adelete_thread(self, thread_id):
-                await asyncio.to_thread(super().delete_thread, thread_id)
-
-        # Ensure parent directory exists
-        db_path = Path(settings.CHECKPOINT_DB_PATH)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        return AsyncCapableSqliteSaver(conn)
-    except Exception as exc:  # pragma: no cover - safety net
-        logger.warning(
-            "Falling back to in-memory LangGraph checkpointer: %s", exc,
-            exc_info=True,
-        )
-        from langgraph.checkpoint.memory import MemorySaver
-
-        return MemorySaver()
-    
 def get_graph(checkpointer=None):
+    logger.info("--- get_graph with checkpointer support loaded. ---")
     # Define the graph
     workflow = StateGraph(AgentState)
 
@@ -493,14 +467,12 @@ def get_graph(checkpointer=None):
     workflow.add_conditional_edges("executor", route_tools, {"tools": "tools", END: END})
     workflow.add_edge("tools", "planner") # After tool execution, go to planner for final response
 
-    # Initialize Checkpointer
-    selected_checkpointer = checkpointer or _build_checkpointer()
-    try:
-        graph = workflow.compile(checkpointer=selected_checkpointer)
-    except TypeError:
-        # Older langgraph versions compiled without a checkpointer parameter
-        logger.warning("workflow.compile does not accept checkpointer; compiling without persistence")
-        graph = workflow.compile()
-    
-    return graph
+    if checkpointer:
+        return workflow.compile(checkpointer=checkpointer)
+    else:
+        # Fallback for non-async contexts or when no checkpointer is provided
+        return workflow.compile()
+
+# Default compiled graph for tests and simple usage
+graph = get_graph()
 

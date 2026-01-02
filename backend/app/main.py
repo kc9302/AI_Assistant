@@ -1,12 +1,16 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
+from fastapi.responses import JSONResponse
 import time
 import json
-from contextlib import asynccontextmanager # Import asynccontextmanager
+from contextlib import asynccontextmanager
 from app.core.settings import settings
 from app.core.logging import setup_logging
 import logging
+from langchain_core.messages import HumanMessage
+import aiosqlite
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 # Setup Logging
 setup_logging()
@@ -21,10 +25,18 @@ async def lifespan(app: FastAPI):
     # Run priming in a separate thread to not block startup
     threading.Thread(target=init_models).start()
     yield
-    logger.info("Application shutting down...") # Optional: add shutdown event logging
+    logger.info("Application shutting down...")
 
+app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 
-app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan) # Pass lifespan to FastAPI
+# Global Exception Handler to Catch Unhandled Exceptions
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled exception during request to {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"error": "An internal server error occurred.", "detail": str(exc)},
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -112,10 +124,8 @@ async def chat(body: dict):
     Chat endpoint for the Flutter app.
     Request body: { "messages": [ ... ] } or { "message": "user input" }
     """
-    from langchain_core.messages import HumanMessage
     from app.agent.graph import get_graph
-    graph = get_graph()
-
+    
     # Normalize input
     user_input = body.get("message")
     mode = body.get("mode", "plan")
@@ -138,7 +148,13 @@ async def chat(body: dict):
         config = {"configurable": {"thread_id": thread_id}}
         
         logger.info(f"Invoking graph for thread_id={thread_id}. Message: {user_input[:100]}...")
-        final_state = await graph.ainvoke(inputs, config=config)
+        
+        async with aiosqlite.connect("./checkpoints.db") as conn:
+            if not hasattr(conn, "is_alive"):
+                conn.is_alive = lambda: True
+            checkpointer = AsyncSqliteSaver(conn)
+            graph = get_graph(checkpointer=checkpointer)
+            final_state = await graph.ainvoke(inputs, config=config)
         
         # Extract the last AI message
         ai_message = final_state["messages"][-1]
