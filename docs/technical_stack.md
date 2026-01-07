@@ -9,5 +9,6 @@
 ### Backend
 - **FastAPI** (High-performance Python Web Server)
 - **LangChain** & **LangGraph** (Agent Orchestration & Workflow)
-- **LLM Provider Adapter** (Ollama / LM Studio)
+- **LLM Model**: **gpt-oss:20b** (Single model architecture for Planner/Executor/Router)
+- **LLM Provider Adapter** (Ollama / LM Studio) - **Manual JSON Parsing Mode**
 - **Sqlite3** (Session Checkpoints & Context Store)

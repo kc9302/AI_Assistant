@@ -109,11 +109,19 @@ def list_calendars() -> str:
     return "선택된 캘린더 목록:\n" + "\n".join(lines)
 
 @tool
-def list_today_events(calendar_id: Optional[str] = None) -> str:
+def list_events(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    calendar_id: Optional[str] = None,
+    max_results: int = 50
+) -> str:
     """
-    오늘 일정을 조회합니다.
+    일정 목록을 조회합니다. 날짜 범위를 지정하여 특정 기간의 일지만 가져올 수 있습니다.
     Args:
-        calendar_id: 특정 캘린더 ID만 조회할 경우 사용 (기본값 None이면 선택된 모든 캘린더 조회)
+        start_date: 시작 날짜 (YYYY-MM-DD 형식). 미지정 시 오늘 기준.
+        end_date: 종료 날짜 (YYYY-MM-DD 형식). 미지정 시 시작 날짜의 다음날(즉, 해당 일자 하루) 조회.
+        calendar_id: 특정 캘린더 ID만 조회할 경우 사용.
+        max_results: 가져올 최대 일정 개수 (기본 50).
     """
     service = get_calendar_service()
     if not service: return "Google Calendar 인증에 실패했습니다."
@@ -124,41 +132,21 @@ def list_today_events(calendar_id: Optional[str] = None) -> str:
         calendars = _get_selected_calendars(service)
         
     kst = timezone(timedelta(hours=9))
-    now_kst = datetime.now(kst)
-    start = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
     
-    events = _fetch_events_from_calendars(
-        service=service,
-        calendars=calendars,
-        time_min=start.isoformat(),
-        time_max=end.isoformat()
-    )
-    
-    label = f"캘린더({calendar_id})" if calendar_id else "선택된 모든 캘린더"
-    return _format_events(events, f"오늘 {label}에 등록된 일정이 없습니다.", label)
-
-@tool
-def list_events_on_date(date: str, calendar_id: Optional[str] = None) -> str:
-    """
-    특정 날짜의 일정을 조회합니다.
-    Args:
-        date: 조회할 날짜 (YYYY-MM-DD 형식, 예: '2025-12-25')
-        calendar_id: 특정 캘린더 ID만 조회할 경우 사용
-    """
-    service = get_calendar_service()
-    if not service: return "Google Calendar 인증에 실패했습니다."
-    
-    if calendar_id:
-        calendars = [{'id': calendar_id, 'summary': f'ID: {calendar_id}'}]
-    else:
-        calendars = _get_selected_calendars(service)
-
     try:
-        kst = timezone(timedelta(hours=9))
-        target_date = datetime.strptime(date, "%Y-%m-%d")
-        start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=kst)
-        end = start + timedelta(days=1)
+        if start_date:
+             s_dt = datetime.strptime(start_date, "%Y-%m-%d")
+             start = datetime(s_dt.year, s_dt.month, s_dt.day, tzinfo=kst)
+        else:
+             start = datetime.now(kst).replace(hour=0, minute=0, second=0, microsecond=0)
+             
+        if end_date:
+             e_dt = datetime.strptime(end_date, "%Y-%m-%d")
+             end = datetime(e_dt.year, e_dt.month, e_dt.day, tzinfo=kst)
+        else:
+             # Default to 1 day range if only start_date is given or both are None
+             end = start + timedelta(days=1)
+             
     except Exception:
         return "날짜 형식이 올바르지 않습니다. 'YYYY-MM-DD' 형식으로 입력해주세요."
     
@@ -166,68 +154,16 @@ def list_events_on_date(date: str, calendar_id: Optional[str] = None) -> str:
         service=service,
         calendars=calendars,
         time_min=start.isoformat(),
-        time_max=end.isoformat()
-    )
-    
-    label = f"캘린더({calendar_id})" if calendar_id else "선택된 모든 캘린더"
-    return _format_events(events, f"{date}의 {label}에는 일정이 없습니다.", label)
-
-@tool
-def list_upcoming_events(max_results: int = 10, calendar_id: Optional[str] = None) -> str:
-    """
-    다가오는 일정을 조회합니다.
-    Args:
-        max_results: 가져올 최대 일정 개수 (기본 10)
-        calendar_id: 특정 캘린더 ID만 조회할 경우 사용
-    """
-    service = get_calendar_service()
-    if not service: return "Google Calendar 인증에 실패했습니다."
-    
-    if calendar_id:
-        calendars = [{'id': calendar_id, 'summary': f'ID: {calendar_id}'}]
-    else:
-        calendars = _get_selected_calendars(service)
-
-    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    
-    events = _fetch_events_from_calendars(
-        service=service,
-        calendars=calendars,
-        time_min=now,
+        time_max=end.isoformat(),
         max_results=max_results
     )
     
-    label = f"캘린더({calendar_id})" if calendar_id else "선택된 모든 캘린더"
-    return _format_events(events[:max_results], "다가올 일정이 없습니다.", label)
-
-@tool
-def list_weekly_events(calendar_id: Optional[str] = None) -> str:
-    """
-    이번 주(오늘부터 7일간)의 일정을 조회합니다.
-    Args:
-        calendar_id: 특정 캘린더 ID만 조회할 경우 사용
-    """
-    service = get_calendar_service()
-    if not service: return "Google Calendar 인증에 실패했습니다."
-    
-    if calendar_id:
-        calendars = [{'id': calendar_id, 'summary': f'ID: {calendar_id}'}]
-    else:
-        calendars = _get_selected_calendars(service)
+    date_range_str = f"{start_date or '오늘'}"
+    if end_date and end_date != start_date:
+        date_range_str += f" ~ {end_date}"
         
-    kst = timezone(timedelta(hours=9))
-    start = datetime.now(kst).replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=7)
-    
-    events = _fetch_events_from_calendars(
-        service=service,
-        calendars=calendars,
-        time_min=start.isoformat(),
-        time_max=end.isoformat()
-    )
-    
     label = f"캘린더({calendar_id})" if calendar_id else "선택된 모든 캘린더"
-    return _format_events(events, f"이번 주 {label}에 예정된 일정이 없습니다.", label)
+    return _format_events(events, f"{date_range_str} 기간에 {label}에 등록된 일정이 없습니다.", label)
 
 @tool
 def create_event(

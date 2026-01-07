@@ -24,9 +24,9 @@
    GOOGLE_CALENDAR_SCOPES=https://www.googleapis.com/auth/calendar
    LLM_PROVIDER=ollama
    LLM_BASE_URL=http://localhost:11434
-   LLM_MODEL=llama3.1:8b
-   LLM_MODEL_PLANNER=llama3.1:8b
-   LLM_MODEL_EXECUTOR=llama3.1:8b
+   LLM_MODEL=gpt-oss:20b
+   LLM_MODEL_PLANNER=gpt-oss:20b
+   LLM_MODEL_EXECUTOR=gpt-oss:20b
    LLM_KEEP_ALIVE=0
    ```
 
@@ -45,9 +45,9 @@
    LLM_BASE_URL=http://localhost:11434
    LLM_API_KEY=
    LLM_EMBEDDING_MODEL=nomic-embed-text
-   LLM_MODEL=llama3.1:8b
-   LLM_MODEL_PLANNER=llama3.1:8b
-   LLM_MODEL_EXECUTOR=llama3.1:8b
+   LLM_MODEL=gpt-oss:20b
+   LLM_MODEL_PLANNER=gpt-oss:20b
+   LLM_MODEL_EXECUTOR=gpt-oss:20b
    ```
    LM Studio 사용 시:
    ```text

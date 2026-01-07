@@ -11,13 +11,13 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str
     LLM_API_KEY: str | None = None
     LLM_EMBEDDING_MODEL: str = "nomic-embed-text"
-    LLM_MODEL: str = "gemma3:27b"
-    LLM_MODEL_PLANNER: str = "gemma3:27b"
-    LLM_MODEL_EXECUTOR: str = "gemma3:27b"
+    LLM_MODEL: str = "gpt-oss:20b"
+    LLM_MODEL_PLANNER: str = "gpt-oss:20b"
+    LLM_MODEL_EXECUTOR: str = "gpt-oss:20b"
     LLM_KEEP_ALIVE: str = "0" # Unload immediately after use
     
     # App
-    PROJECT_NAME: str = "FunctionGemma Agent"
+    PROJECT_NAME: str = "AI Assistant Agent"
     CHECKPOINT_DB_PATH: str = "data/checkpoints.db"
     
     model_config = ConfigDict( # Use model_config instead of Config class

@@ -36,7 +36,7 @@ class OllamaProvider(LLMProvider):
             base_url=self._base_url,
             model=model,
             temperature=0.0,
-            format="json",
+            format=kwargs.pop("format", "json"),
             ollama_kwargs=ollama_kwargs,
             **kwargs,
         )

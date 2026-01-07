@@ -1,10 +1,10 @@
 # AI 개인비서 Flutter 앱
 
-**FunctionGemma 기반 AI 에이전트** - Ollama 서버 연동 및 온디바이스 추론을 지원하는 스마트 개인 비서 앱
+**LangGraph 기반 AI 에이전트** - Ollama 서버(gpt-oss:20b)를 활용한 싱글 모델 아키텍처 개편 및 스마트 개인 비서 앱
 
 ## 주요 기능
 
-- ✅ **LangGraph 기반 대화형 AI**: 로컬(270M) 및 서버(27B) 모델을 유기적으로 활용하는 하이브리드 추론 엔진
+- ✅ **LangGraph 기반 대화형 AI**: Ollama 서버의 gpt-oss:20b 모델을 활용한 고성능 싱글 모델 추론 엔진 (Manual JSON Parsing 적용)
 - ✅ **Google 캘린더 지능형 연동**: 자연어를 통한 일정 조회, 생성, 삭제 및 다중 캘린더 지원
 - ✅ **지능형 하이브리드 메모리 시스템**: 
   - **세션 영속성 (Persistence)**: SqliteSaver 기반의 multi-turn 대화 상태 자동 저장 및 복구
@@ -36,11 +36,8 @@ graph TB
         LLMProvider["LLM Provider Adapter"]
         
         subgraph Agent ["LangGraph Agent Engine"]
-            Router{Remote Router}
-            Planner["Planner - Gemma 27B"]
+            Planner["Planner - gpt-oss:20b"]
             Executor["Executor - Tool Caller"]
-            Router --> Planner
-            Router --> Executor
             Planner --> Executor
         end
         
@@ -120,10 +117,11 @@ LLM_BASE_URL=http://localhost:11434
 LLM_API_KEY=
 LLM_EMBEDDING_MODEL=nomic-embed-text
 
-# Model selection (shared)
-LLM_MODEL=gemma3:27b
-LLM_MODEL_PLANNER=gemma3:27b
-LLM_MODEL_EXECUTOR=gemma3:27b
+# Model selection (available on user's Ollama server)
+LLM_MODEL=gpt-oss:20b
+LLM_MODEL_PLANNER=gpt-oss:20b
+LLM_MODEL_EXECUTOR=gpt-oss:20b
+# Alternative: llama3.1:8b, llama2:13b
 ```
 
 LM Studio example:
@@ -165,6 +163,7 @@ Note: LM Studio must have a model loaded (Developer tab) before chat requests wi
 
 더 자세한 내용은 다음 문서를 참조하세요:
 
+*   [**AI 작업 맥락 및 워크플로우 가이드**](docs/ai_context_guide.md)
 *   [**기술 스택**](docs/technical_stack.md)
 *   [**지능형 하이브리드 메모리 아키텍처**](docs/hybrid_memory_system.md)
 *   [**개발 및 테스트 가이드**](docs/development_and_testing.md)
@@ -174,5 +173,5 @@ Note: LM Studio must have a model loaded (Developer tab) before chat requests wi
 *   [**테스트 질문 예시**](docs/test_questions.md)
 
 ---
-**현재 버전**: 1.0.0 (Stable)  
-**최근 업데이트**: 2025-12-30
+**현재 버전**: 1.1.0 (Stable)  
+**최근 업데이트**: 2026-01-07

@@ -8,10 +8,7 @@ from app.agent.llm import get_llm
 from app.core.settings import settings
 from app.tools.calendar import (
     list_calendars,
-    list_today_events,
-    list_events_on_date,
-    list_upcoming_events,
-    list_weekly_events,
+    list_events,
     create_event,
     delete_event,
     _get_selected_calendars
@@ -26,10 +23,7 @@ from app.services.memory import memory_service
 # List of tools
 tools = [
     list_calendars,
-    list_today_events,
-    list_events_on_date,
-    list_upcoming_events,
-    list_weekly_events,
+    list_events,
     create_event,
     delete_event
 ] + memory_tools + travel_tools
@@ -209,6 +203,9 @@ Example 4: "Check my schedule for next week and find a 1h slot for tennis" -> {{
         content = response.content
         logger.debug(f"Raw Router Output: {content}")
         json_str = extract_json(content)
+        if not json_str:
+             logger.warning("Router returned empty JSON. Defaulting to 'complex'.")
+             return {"router_mode": "complex"}
         
         try:
             parsed = base_router_parser.parse(json_str)
@@ -284,10 +281,7 @@ def planner(state: AgentState):
         and messages
         and messages[-1] is last_tool_msg
         and last_tool_msg.name in {
-            "list_today_events",
-            "list_events_on_date",
-            "list_upcoming_events",
-            "list_weekly_events",
+            "list_events",
             "list_calendars",
         }
     ):
@@ -306,8 +300,9 @@ def planner(state: AgentState):
             "needs_confirmation": False,
         }
     
-    remote_llm = get_llm(model=settings.LLM_MODEL_PLANNER)
-    structured_llm = remote_llm.with_structured_output(PlannerResponse)
+    logger.info(f"Invoking Remote Planner ({settings.LLM_MODEL_PLANNER}) - Flexible JSON Mode")
+    remote_llm = get_llm(model=settings.LLM_MODEL_PLANNER, format=None) # Disable Ollama strict JSON mode
+    # structured_llm = remote_llm.with_structured_output(PlannerResponse) # Removed for OSS compatibility
     
     system_prompt = f"""You are a Versatile AI Assistant Planner. 
 {time_str}
@@ -320,12 +315,21 @@ Analyze the conversation and determine the next step:
 Use 'plan' if you can answer the user's question directly using the provided 'User Facts' or 'Past Conversations' summaries.
 Only use 'execute' if you strictly need a tool to fulfill the request.
 
+CRITICAL CALENDAR RULE:
+- For ALL requests to see, check, or list the schedule (today, tomorrow, or any date), you MUST set 'mode': 'execute' to check the live calendar. 
+- DO NOT assume you know the schedule from past turns or facts.
+- ONLY use 'plan' for schedule queries IF you are summarizing a tool result that was JUST executed in the current turn.
+
 Available tools: {[t.name for t in tools]}
 
 LANGUAGE RULES:
 - If the user's latest query is in Korean, you MUST set 'language': 'ko' and respond in Korean.
 - If the user's latest query is in English, you MUST set 'language': 'en' and respond in English.
 - This applies STRICTLY to the 'assistant_message' field.
+
+TEMPORAL REASONING:
+- In 'intent_description', ALWAYS convert relative date terms (tomorrow, next Wednesday, 2 days later) into absolute YYYY-MM-DD format based on the 'Current Time' provided.
+- Example: If today is 2026-01-07 and user says "2 days later", 'intent_description' should contain "2026-01-09".
 
 LONG-TERM KNOWLEDGE:
 - User Facts: {json.dumps(facts, ensure_ascii=False)}
@@ -346,6 +350,11 @@ EXAMPLES OF SEARCH DECISIONS:
     # If we have tool results, the planner must likely summarize (mode='plan')
     if is_current_tool_result:
         tool_data = str(last_tool_msg.content)
+        # TRUNCATION: Limit to 4000 chars to avoid context window blowup
+        if len(tool_data) > 4000:
+             logger.info(f"Truncating large tool result in Planner: {len(tool_data)} -> 4000 chars")
+             tool_data = tool_data[:4000] + "\n\n...(Results truncated for brevity)..."
+             
         logger.info(f"Planner received tool result ({len(tool_data)} chars).")
         system_prompt += f"\n\nCRITICAL: A tool was just executed with the following result:\n{tool_data}\n\nINSTRUCTION: The answer is likely in the text above. READ CAREFULLY. Use 'mode': 'plan' and summarize the information for the user immediately. DO NOT call the same tool again with the same query."
     
@@ -358,17 +367,30 @@ EXAMPLES OF SEARCH DECISIONS:
         recent_events_str = "\n".join([f"- ID: {e['event_id']}, Summary: {e['summary']}, Created: {e['created_at']}" for e in recent_events])
         system_prompt += f"\n\n[RECENTLY CREATED EVENTS (Use these IDs for deletion/updates)]:\n{recent_events_str}\n"
 
+    # Adding format instructions
+    system_prompt += f"\n\nRESPONSE FORMAT:\nRespond ONLY in valid JSON. \n{base_planner_parser.get_format_instructions()}"
+
     prompt_messages = [SystemMessage(content=system_prompt)] + [m for m in messages if not isinstance(m, SystemMessage)]
     
     # Add a final context-aware language hint
     is_ko = any(ord(char) > 0x1100 for char in last_user_msg)
     lang_hint = "Korean" if is_ko else "English"
-    prompt_messages.append(HumanMessage(content=f"[SYSTEM HINT: Output language must be {lang_hint}]"))
+    prompt_messages.append(HumanMessage(content=f"[SYSTEM HINT: Output language must be {lang_hint}. OUTPUT JSON ONLY.]"))
     
-    logger.info(f"Invoking Remote Planner ({settings.LLM_MODEL_PLANNER}) with Structured Output")
+    logger.info(f"Submitting to Remote Planner...")
     start_t = time.time()
     try:
-        parsed = structured_llm.invoke(prompt_messages)
+        response = remote_llm.invoke(prompt_messages)
+        content = response.content
+        json_str = extract_json(content)
+        if not json_str:
+            raise ValueError("Planner returned empty or invalid JSON string.")
+
+        try:
+            parsed = base_planner_parser.parse(json_str)
+        except Exception as parse_err:
+            logger.warn(f"Planner JSON parse failed: {parse_err}. Attempting fix...")
+            parsed = fix_json_with_llm(json_str, str(parse_err), base_planner_parser)
         
         # If the model still tries to execute despite having results, and it's a simple list, force plan
         if is_current_tool_result and parsed.mode == "execute":
@@ -397,29 +419,67 @@ EXAMPLES OF SEARCH DECISIONS:
         }
     except Exception as e:
         logger.error(f"Planner error: {e}")
-        return {"messages": [AIMessage(content=f"Error in planning: {e}")], "mode": "plan"}
+        friendy_msg = "죄송합니다. 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
+        return {"messages": [AIMessage(content=friendy_msg)], "mode": "plan"}
 
 def executor_node(state: AgentState, config):
     """Transforms intent into tool calls using Structured Output fallback."""
     intent = state.get("intent_summary") or next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "List my events today")
     messages = state["messages"]
     last_user_message = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
-    time_str = f"Current Time(Asia/Seoul): {get_current_time_str()}"
-    
+    kst = timezone(timedelta(hours=9))
+    now_kst = datetime.now(kst)
+    today_str = now_kst.strftime('%Y-%m-%d')
+    tomorrow_str = (now_kst + timedelta(days=1)).strftime('%Y-%m-%d')
+    day_after_tomorrow_str = (now_kst + timedelta(days=2)).strftime('%Y-%m-%d')
+
+    # Generate tool signatures
+    tool_signatures = []
+    for t in tools:
+        args_schema = t.args_schema.schema() if t.args_schema else {}
+        tool_signatures.append(f"- {t.name}: {t.description}\n  Args: {json.dumps(args_schema.get('properties', {}), ensure_ascii=False)}")
+    tool_sigs_str = "\n".join(tool_signatures)
+
     system_prompt = f"""You are a Tool-Calling Expert. Generate the exact tool call for the intent.
-{time_str}
-Available tools: {[t.name for t in tools]}
+Current Time(Asia/Seoul): {get_current_time_str()}
+
+DATE REFERENCE (Use these for relative date queries):
+- 오늘 (Today): {today_str}
+- 내일 (Tomorrow): {tomorrow_str}
+- 2일 뒤 (2 days later): {day_after_tomorrow_str}
+
+Available tools:
+{tool_sigs_str}
 
 CRITICAL RULES FOR ARGUMENTS:
 - When a tool requires 'calendar_id', you MUST look up the user-provided calendar name in the 'Calendar Name to ID Mapping' and use the corresponding 'id'.
     - If the name is not in the mapping, use 'primary'.
     - **Verify the ID matches the mapping EXACTLY. Do NOT truncate the domain (e.g., keep '@group.calendar.google.com').**
+- ALWAYS use 'summary' for the event title, NEVER 'subject' or 'title'.
+
+TEMPORAL RULES:
+- ALWAYS use the absolute YYYY-MM-DD from the 'DATE REFERENCE' above for 'start_date' and 'end_date'.
+- For a single day view, 'end_date' MUST be 'start_date' + 1 day.
+
+EVENT RULES:
 - 'create_event': Use 'summary' (Title), 'start_time' (ISO), 'end_time' (ISO).
 - 'delete_event': Use 'event_id'.
     - **CRITICAL**: 'event_id' is NOT the same as 'calendar_id'.
     - **NEVER** use an email-like string (e.g., '...@group.calendar.google.com') as an 'event_id'.
     - Look for the 'event_id' in the '[RECENTLY CREATED EVENTS]' section if the user refers to "that event" or "the event I just created".
-- ALWAYS use 'summary' for the event title, NEVER 'subject' or 'title'.
+
+EXAMPLES:
+1. Intent: "내일 오전 10시에 '회의' 일정 추가해줘"
+   Response: {{"proposed_action": {{"tool": "create_event", "args": {{"summary": "회의", "start_time": "2026-01-08T10:00:00Z", "end_time": "2026-01-08T11:00:00Z"}}}}, "reasoning": "Create event as requested."}}
+2. Intent: "'팀 점심' 일정 취소해줘"
+   Response: {{"proposed_action": {{"tool": "delete_event", "args": {{"event_id": "CAL_EVENT_123"}}}}, "reasoning": "Delete the specific event."}}
+3. Intent: "2026-01-09 일정 보여줘" (Show schedule for Jan 9th)
+   Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-09", "end_date": "2026-01-10"}}}}, "reasoning": "List events for a specific date."}}
+4. Intent: "내일 일정 보여줘" (Show tomorrow's schedule)
+   Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-08", "end_date": "2026-01-09"}}}}, "reasoning": "Calculate tomorrow's date (today+1) and list."}}
+5. Intent: "2일 뒤 일정 보여줘"
+   Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-09", "end_date": "2026-01-10"}}}}, "reasoning": "Calculate date (today+2) and list."}}
+
 Intent: {intent}
 """
 
@@ -450,20 +510,35 @@ Intent: {intent}
 
     context_str = f"User Context: {facts}\n\nCalendar Name to ID Mapping: {json.dumps(calendar_name_to_id_map, ensure_ascii=False)}" + recent_events_str
 
+    # Adding format instructions
+    system_prompt += f"\n\nRESPONSE FORMAT:\nRespond ONLY in valid JSON. \n{base_executor_parser.get_format_instructions()}"
+
     executor_model = settings.LLM_MODEL_EXECUTOR or settings.LLM_MODEL_PLANNER
-    llm = get_llm(model=executor_model).with_structured_output(ExecutorResponse)
+    llm = get_llm(model=executor_model, format=None) # Disable Ollama strict JSON mode
     prompt = [SystemMessage(content=system_prompt), HumanMessage(content=f"Follow intent: {intent}")]
     
-    logger.info(f"Invoking Remote Executor ({executor_model}) - Structured Output...")
+    logger.info(f"Invoking Remote Executor ({executor_model}) - Flexible JSON Mode...")
     try:
-        parsed = llm.invoke(prompt)
+        response = llm.invoke(prompt)
+        content = response.content
+        json_str = extract_json(content)
+        if not json_str:
+             raise ValueError("Executor returned empty or invalid JSON string.")
+        
+        try:
+            parsed = base_executor_parser.parse(json_str)
+        except Exception as parse_err:
+             logger.warn(f"Executor JSON parse failed: {parse_err}. Attempting fix...")
+             parsed = fix_json_with_llm(json_str, str(parse_err), base_executor_parser)
+
         logger.info(f"Executor Decision: {parsed.proposed_action.tool}({parsed.proposed_action.args})")
         # The original code had a return here, but the guardrails and toolcall creation were after it.
         # This implies the return was meant to be after the guardrails.
         # I will keep the guardrails and toolcall creation, and move the return to the end of the function.
     except Exception as e:
         logger.error(f"Executor failed: {e}")
-        return {"messages": [AIMessage(content=f"Tool execution failed: {e}")], "mode": "plan"}
+        friendy_msg = "죄송합니다. 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
+        return {"messages": [AIMessage(content=friendy_msg)], "mode": "plan"}
 
     if parsed:
         # --- GUARDRAIL: Fix ID Hallucination (Calendar ID vs Event ID) ---
@@ -497,10 +572,10 @@ Intent: {intent}
             # Check if this ID is valid (exists in map values)
             # We need to flatten the map values to check existence
             valid_ids = list(calendar_name_to_id_map.values())
-            if cal_id not in valid_ids and cal_id != "primary":
+            if cal_id and cal_id not in valid_ids and cal_id != "primary":
                 # Check for partial match (truncation)
                 for full_id in valid_ids:
-                    if full_id.startswith(cal_id) and "@" in full_id:
+                    if cal_id and full_id.startswith(cal_id) and "@" in full_id:
                         parsed.proposed_action.args["calendar_id"] = full_id
                         logger.info(f"Guardrail auto-corrected truncated calendar_id: '{cal_id}' -> '{full_id}'")
                         break
@@ -526,10 +601,7 @@ Intent: {intent}
 
 def route_after_router(state: AgentState):
     """Routes based on router's decision."""
-    mode = state.get("router_mode")
-    if mode == "simple":
-        return "executor"
-    # Both 'complex' and 'answer' should go through planner for consistency
+    # Always go through planner for superior temporal reasoning and intent processing.
     return "planner"
 
 def route_planner(state: AgentState):
