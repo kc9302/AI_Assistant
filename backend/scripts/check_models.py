@@ -1,9 +1,12 @@
-import ollama
+from app.agent.llm import provider_health
 from app.core.settings import settings
 
-client = ollama.Client(host=settings.OLLAMA_HOST)
-try:
-    models = client.list()
-    print(models)
-except Exception as e:
-    print(f"Error: {e}")
+health = provider_health()
+print(
+    {
+        "provider": settings.LLM_PROVIDER,
+        "base_url": health.base_url,
+        "ok": health.ok,
+        "details": health.details,
+    }
+)

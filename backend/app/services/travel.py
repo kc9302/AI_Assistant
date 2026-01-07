@@ -4,8 +4,8 @@ from typing import List, Dict, Any
 from langchain_community.document_loaders import DirectoryLoader, UnstructuredMarkdownLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_ollama import OllamaEmbeddings
 from app.core.settings import settings
+from app.agent.llm import get_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +14,7 @@ VECTOR_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__
 
 class TravelKnowledgeService:
     def __init__(self):
-        self.embeddings = OllamaEmbeddings(
-            base_url=settings.OLLAMA_HOST,
-            model="nomic-embed-text" # Using a standard embedding model
-        )
+        self.embeddings = get_embeddings(settings.LLM_EMBEDDING_MODEL)
         self.vector_db = None
         self._load_vector_db()
 
@@ -45,10 +42,11 @@ class TravelKnowledgeService:
         
         # Load markdown files
         loader = DirectoryLoader(
-            KNOWLEDGE_DIR, 
-            glob="**/*.md", 
-            loader_cls=TextLoader, # Using TextLoader for simplicity with MD
-            show_progress=True
+            KNOWLEDGE_DIR,
+            glob="**/*.md",
+            loader_cls=TextLoader,  # Using TextLoader for simplicity with MD
+            loader_kwargs={"encoding": "utf-8"},
+            show_progress=True,
         )
         documents = loader.load()
         
@@ -72,7 +70,7 @@ class TravelKnowledgeService:
         self.vector_db.save_local(VECTOR_DB_PATH)
         logger.info(f"Travel index built and saved with {len(chunks)} chunks.")
 
-    def search(self, query: str, k: int = 3) -> List[Dict[str, Any]]:
+    def search(self, query: str, k: int = 3, source_filter: str | None = None) -> List[Dict[str, Any]]:
         """Searches the vector DB for relevant travel information."""
         if not self.vector_db:
             logger.warning("Travel vector DB not initialized.")
@@ -80,7 +78,14 @@ class TravelKnowledgeService:
             
         # Add prefix for nomic-embed-text
         formatted_query = f"search_query: {query}"
-        results = self.vector_db.similarity_search_with_score(formatted_query, k=k)
+        if source_filter:
+            results = self.vector_db.similarity_search_with_score(
+                formatted_query,
+                k=k,
+                filter={"source": source_filter},
+            )
+        else:
+            results = self.vector_db.similarity_search_with_score(formatted_query, k=k)
         
         formatted_results = []
         for doc, score in results:

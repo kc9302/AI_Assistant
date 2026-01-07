@@ -98,22 +98,16 @@ def health():
 
 @app.get("/status")
 def status():
-    import requests
-    ollama_connected = False
-    try:
-        # Quick check to see if Ollama is reachable
-        # OLLAMA_HOST is typically just the base URL (e.g., http://localhost:11434)
-        response = requests.get(settings.OLLAMA_HOST, timeout=2)
-        if response.status_code == 200:
-            ollama_connected = True
-    except:
-        ollama_connected = False
+    from app.agent.llm import provider_health
+    health = provider_health()
 
     return {
-        "status": "ok", 
-        "ollama_host": settings.OLLAMA_HOST, 
-        "ollama_model": settings.OLLAMA_MODEL,
-        "ollama_connected": ollama_connected,
+        "status": "ok",
+        "llm_provider": settings.LLM_PROVIDER,
+        "llm_base_url": health.base_url,
+        "llm_model": settings.LLM_MODEL,
+        "llm_connected": health.ok,
+        "llm_details": health.details,
         "google_api_configured": bool(settings.GOOGLE_API_KEY),
         "version": "debug-1-check"
     }
@@ -191,20 +185,9 @@ async def unload_model():
     Forcefully unloads the LLM from memory by sending a keep-alive of 0.
     """
     try:
-        from app.agent.llm import get_llm
-        # Invoke with empty prompt and keep_alive=0 to trigger unload
-        llm = get_llm(keep_alive="0")
-        # Generate a dummy request to trigger the keep-alive setting
-        # We use a very simplified call or just access the client if possible.
-        # LangChain's ChatOllama doesn't expose a direct 'unload' method, 
-        # but invoking it with a specific keep_alive setting updates the model state.
-        # We'll use a fast check. However, invoking with "" might return empty string or error.
-        # Better approach: Just use requests to hit the Ollama API directly for unload if this fails.
-        # But let's try the langchain way first for consistency.
-        
-        # Actually, simpler: just invoke with a 0 keep_alive.
-        llm.invoke("Hi") 
-        return {"status": "success", "message": "Model unload instruction sent (processed payload with keep_alive=0)."}
+        from app.agent.llm import unload_model as unload_provider_model
+        unload_provider_model()
+        return {"status": "success", "message": "Model unload instruction sent."}
     except Exception as e:
         logger.error(f"Error unloading model: {e}")
         return {"status": "error", "message": str(e)}

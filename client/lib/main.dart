@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:client/data/repositories/chat_repository_impl.dart';
@@ -14,20 +16,30 @@ void main() {
       providers: [
         ChangeNotifierProvider(create: (_) => SettingsProvider()),
         Provider<LocalLlmRepository>(create: (_) => LocalLlmRepositoryImpl()),
-        ProxyProvider<SettingsProvider, ChatRepository>(
-          update: (context, settings, previous) =>
-              ChatRepositoryImpl(baseUrl: settings.baseUrl),
+        Provider<ChatRepository>(
+          create: (_) {
+            String baseUrl;
+            try {
+              if (Platform.isAndroid) {
+                baseUrl = 'http://10.0.2.2:8000';
+              } else {
+                baseUrl = 'http://localhost:8000';
+              }
+            } catch (e) {
+              baseUrl = 'http://localhost:8000';
+            }
+            return ChatRepositoryImpl(baseUrl: baseUrl);
+          },
         ),
-        ProxyProvider3<
-          SettingsProvider,
+        ProxyProvider2<
           ChatRepository,
           LocalLlmRepository,
           HybridRouter
         >(
-          update: (context, settings, remote, local, previous) => HybridRouter(
+          update: (context, remote, local, previous) => HybridRouter(
             remoteRepository: remote,
             localRepository: local,
-            preferLocal: settings.useLocalLlm,
+            preferLocal: false,
           ),
         ),
         ChangeNotifierProxyProvider<HybridRouter, ChatProvider>(
@@ -46,28 +58,17 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<SettingsProvider>(
-      builder: (context, settings, child) {
-        return MaterialApp(
-          title: 'FunctionGemma Agent',
-          themeMode: settings.themeMode,
-          theme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: Colors.deepPurple,
-              brightness: Brightness.light,
-            ),
-            useMaterial3: true,
-          ),
-          darkTheme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: Colors.deepPurple,
-              brightness: Brightness.dark,
-            ),
-            useMaterial3: true,
-          ),
-          home: const ChatPage(),
-        );
-      },
+    return MaterialApp(
+      title: 'FunctionGemma Agent',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.deepPurple,
+          brightness: Brightness.light,
+        ),
+        useMaterial3: true,
+      ),
+      home: const ChatPage(),
     );
   }
 }

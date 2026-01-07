@@ -1,6 +1,7 @@
 from typing import List, Dict, Any
+import os
 from langchain_core.tools import tool
-from app.services.travel import travel_knowledge_service
+from app.services.travel import travel_knowledge_service, KNOWLEDGE_DIR
 
 @tool
 def search_travel_info(query: str = None, destination: str = None, location: str = None) -> str:
@@ -13,7 +14,20 @@ def search_travel_info(query: str = None, destination: str = None, location: str
     if not search_query:
         return "검색어를 입력해주세요. (예: '비행기 시간', '호텔 주소')"
 
-    results = travel_knowledge_service.search(search_query, k=5)
+    text = (search_query or "").lower()
+    wants_logistics = any(
+        k in text
+        for k in (
+            "flight", "airline", "ticket", "boarding", "gate", "itinerary",
+            "항공", "비행", "항공편", "편명", "탑승", "게이트", "예약번호",
+            "hotel", "숙소", "호텔", "주소", "체크인", "체크아웃",
+        )
+    )
+    source_filter = None
+    if wants_logistics:
+        source_filter = os.path.normpath(os.path.join(KNOWLEDGE_DIR, "logistics.md"))
+
+    results = travel_knowledge_service.search(search_query, k=5, source_filter=source_filter)
     if not results:
         return f"'{search_query}'에 대한 검색 결과가 없습니다."
         

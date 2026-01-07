@@ -20,7 +20,8 @@
 
 ## 전체 시스템 아키텍처 (System Architecture)
 
-본 서비스는 고성능 LLM 기반의 에이전트 엔진과 캘린더 API가 결합된 구조를 가집니다.
+본 서비스는 고성능 LLM 기반의 에이전트 엔진과 캘린더 API가 결합된 구조이며,
+LLM Provider 추상화를 통해 Ollama/LM Studio를 앞단에서 교체할 수 있습니다.
 
 ```mermaid
 graph TB
@@ -32,6 +33,7 @@ graph TB
 
     subgraph Backend ["FastAPI Backend (Python)"]
         API["API Endpoints"]
+        LLMProvider["LLM Provider Adapter"]
         
         subgraph Agent ["LangGraph Agent Engine"]
             Router{Remote Router}
@@ -50,17 +52,23 @@ graph TB
         end
 
         API <--> Agent
+        Agent <--> LLMProvider
         Agent <--> Storage
     end
 
+    subgraph LLMInfra ["LLM Backends"]
+        Ollama["Ollama Server"]
+        LMStudio["LM Studio Server"]
+    end
+
     subgraph Infrastructure ["External Services / Knowledge"]
-        Ollama["Ollama Server - Gemma3 27B"]
         GCal["Google Calendar API"]
         Docs["Travel Documents - Markdown"]
     end
 
     Prov <--> API
-    Agent <--> Ollama
+    LLMProvider <--> Ollama
+    LLMProvider <--> LMStudio
     Agent <--> GCal
 
     style Client fill:#e1f5fe,stroke:#01579b
@@ -100,6 +108,58 @@ graph TB
 이 프로젝트를 로컬 환경에서 실행하는 방법에 대한 자세한 내용은 다음 문서를 참조하세요:
 
 *   [**설치 및 실행 가이드**](docs/getting_started.md)
+
+## LLM Provider Configuration
+
+Use these env vars to switch providers without touching the rest of the code.
+
+```text
+# Provider switch (ollama | lmstudio)
+LLM_PROVIDER=ollama
+LLM_BASE_URL=http://localhost:11434
+LLM_API_KEY=
+LLM_EMBEDDING_MODEL=nomic-embed-text
+
+# Model selection (shared)
+LLM_MODEL=gemma3:27b
+LLM_MODEL_PLANNER=gemma3:27b
+LLM_MODEL_EXECUTOR=gemma3:27b
+```
+
+LM Studio example:
+
+```text
+LLM_PROVIDER=lmstudio
+LLM_BASE_URL=http://127.0.0.1:1234/v1
+LLM_API_KEY=lm-studio
+LLM_MODEL=zai-org/glm-4.6v-flash
+LLM_MODEL_PLANNER=zai-org/glm-4.6v-flash
+LLM_MODEL_EXECUTOR=zai-org/glm-4.6v-flash
+```
+
+Run with profile env files (recommended):
+
+```powershell
+cd backend
+.\scripts\run_backend.ps1 -Profile lmstudio -Reload
+```
+
+`GET /status` response fields:
+
+```json
+{
+  "status": "ok",
+  "llm_provider": "lmstudio",
+  "llm_base_url": "http://127.0.0.1:1234/v1",
+  "llm_model": "zai-org/glm-4.6v-flash",
+  "llm_connected": true,
+  "llm_details": null,
+  "google_api_configured": true,
+  "version": "debug-1-check"
+}
+```
+
+Note: LM Studio must have a model loaded (Developer tab) before chat requests will succeed.
 
 ## 추가 문서
 

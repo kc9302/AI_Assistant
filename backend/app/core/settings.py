@@ -6,18 +6,22 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: str | None = None
     GOOGLE_CALENDAR_SCOPES: str | None = None
     
-    # Ollama
-    OLLAMA_HOST: str
-    OLLAMA_MODEL: str = "gemma3:27b"
-    OLLAMA_MODEL_PLANNER: str = "gemma3:27b"
-    OLLAMA_KEEP_ALIVE: str = "0" # Unload immediately after use
+    # LLM Provider
+    LLM_PROVIDER: str = "ollama"
+    LLM_BASE_URL: str
+    LLM_API_KEY: str | None = None
+    LLM_EMBEDDING_MODEL: str = "nomic-embed-text"
+    LLM_MODEL: str = "gemma3:27b"
+    LLM_MODEL_PLANNER: str = "gemma3:27b"
+    LLM_MODEL_EXECUTOR: str = "gemma3:27b"
+    LLM_KEEP_ALIVE: str = "0" # Unload immediately after use
     
     # App
     PROJECT_NAME: str = "FunctionGemma Agent"
     CHECKPOINT_DB_PATH: str = "data/checkpoints.db"
     
     model_config = ConfigDict( # Use model_config instead of Config class
-        env_file = ".env",
+        env_file = (".env", "backend/.env"),
         env_file_encoding = "utf-8",
         extra = "ignore"
     )

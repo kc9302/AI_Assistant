@@ -21,6 +21,14 @@ class MemoryService:
             with open(USER_PROFILE_PATH, "w", encoding="utf-8") as f:
                 json.dump({"patterns": [], "facts": {}, "history": []}, f)
 
+    def _normalize_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(profile, dict):
+            profile = {}
+        profile.setdefault("patterns", [])
+        profile.setdefault("facts", {})
+        profile.setdefault("history", [])
+        return profile
+
     def save_session(self, thread_id: str, messages: List[BaseMessage]):
         """Saves current session messages to JSON in date-based directory."""
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -96,24 +104,31 @@ class MemoryService:
         """Returns the long-term user profile."""
         try:
             with open(USER_PROFILE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                profile = json.load(f)
+            profile = self._normalize_profile(profile)
+            return profile
         except Exception as e:
             logger.error(f"Failed to load user profile: {e}")
             return {"patterns": [], "facts": {}, "history": []}
 
     def update_user_profile(self, new_facts: Dict[str, Any]):
         """Updates the persistent user profile facts."""
-        profile = self.get_user_profile()
-        if "facts" not in profile:
-            profile["facts"] = {}
+        profile = self._normalize_profile(self.get_user_profile())
         profile["facts"].update(new_facts)
         self._save_profile(profile)
 
+    def add_user_pattern(self, pattern: str):
+        """Adds a new pattern entry if it does not already exist."""
+        if not pattern:
+            return
+        profile = self._normalize_profile(self.get_user_profile())
+        if pattern not in profile["patterns"]:
+            profile["patterns"].append(pattern)
+            self._save_profile(profile)
+
     def add_session_summary(self, thread_id: str, category: str, summary: str):
         """Adds or updates a session summary in the user profile history."""
-        profile = self.get_user_profile()
-        if "history" not in profile:
-            profile["history"] = []
+        profile = self._normalize_profile(self.get_user_profile())
         
         # Check if thread already exists in history to update it
         existing = next((item for item in profile["history"] if item["thread_id"] == thread_id), None)
@@ -164,8 +179,9 @@ class MemoryAnalyzer:
         from app.agent.llm import get_llm
         from app.core.settings import settings
         from app.core.utils import extract_json
+        from langchain_core.messages import ToolMessage
         
-        llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER)
+        llm = get_llm(model=settings.LLM_MODEL_PLANNER)
         
         prompt = f"""You are a Fact Extractor & Conversation Summarizer. 
 Analyze the following conversation and extract:
@@ -197,6 +213,22 @@ If no new facts found, 'facts' should be {{}}.
             new_facts = data.get("facts", {})
             category = data.get("category", "General")
             summary = data.get("summary", "Conversation snapshot")
+
+            # Only keep travel facts when grounded in travel knowledge (logistics.md).
+            allow_travel = any(
+                isinstance(m, ToolMessage)
+                and m.name == "search_travel_info"
+                and "logistics.md" in str(m.content)
+                for m in messages
+            )
+            if new_facts and not allow_travel:
+                def is_travel_key(key: str) -> bool:
+                    k = key.lower()
+                    return (
+                        k.startswith("travel_")
+                        or any(tok in k for tok in ["travel", "flight", "hotel", "accommodation", "check_in", "check-in", "itinerary", "airline", "ticket", "boarding", "gate", "osaka"])
+                    )
+                new_facts = {k: v for k, v in new_facts.items() if not is_travel_key(k)}
             
             # Use specific thread_id if available from message context or pass as arg
             # For background tasks, we usually have a way to know which thread it was.

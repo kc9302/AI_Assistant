@@ -46,16 +46,99 @@ from app.services.context_manager import context_manager # Added import
 from app.core.utils import extract_json # Added import
 
 TRAVEL_ROUTER_HINTS = (
-    "비행", "항공", "항공편", "편명", "출발", "도착", "탑승", "예약번호",
-    "flight", "airline", "booking", "ticket",
-    "오사카", "간사이", "호텔", "숙소",
+    "osaka", "오사카", "간사이", "일본",
+    "비행", "항공", "항공편", "항공권", "항공사", "편명", "탑승", "게이트",
+    "출발", "도착", "환승", "경유", "수하물", "예약번호", "pnr",
+    "flight", "airline", "booking", "ticket", "boarding", "gate", "itinerary",
+    "여행", "여정", "숙소", "호텔", "렌터카", "투어",
+)
+TRAVEL_ROUTER_REGEX = (
+    re.compile(r"\b(kix|itm|nrt|hnd|icn|gmp)\b", re.IGNORECASE),
+    re.compile(r"\b(e-?ticket|eticket)\b", re.IGNORECASE),
+)
+CALENDAR_ONLY_HINTS = (
+    "캘린더", "calendar", "일정", "스케줄", "회의", "미팅", "약속",
+    "오늘 일정", "내일 일정", "이번 주 일정", "주간 일정", "월간 일정",
+    "today schedule", "tomorrow schedule", "weekly schedule",
 )
 
 def is_travel_query(message: str) -> bool:
     if not message:
         return False
     text = message.lower()
-    return any(hint in text for hint in TRAVEL_ROUTER_HINTS)
+    has_travel_hint = any(hint in text for hint in TRAVEL_ROUTER_HINTS) or any(
+        pattern.search(text) for pattern in TRAVEL_ROUTER_REGEX
+    )
+    has_calendar_hint = any(hint in text for hint in CALENDAR_ONLY_HINTS)
+
+    if has_calendar_hint and not has_travel_hint:
+        return False
+    return has_travel_hint
+
+def normalize_travel_search_query(intent: str, last_user_message: str, args: dict) -> dict:
+    """
+    Ensure travel search uses a specific query rather than a vague destination-only lookup.
+    """
+    flight_hints = (
+        "flight", "airline", "ticket", "boarding", "gate", "pnr",
+        "비행", "항공", "항공편", "항공권", "항공사", "편명", "탑승", "게이트", "예약번호",
+    )
+    intent_text = (intent or "").lower()
+    user_text = (last_user_message or "").lower()
+    wants_flight = any(h in intent_text for h in flight_hints) or any(h in user_text for h in flight_hints)
+
+    dest = args.get("destination") or args.get("location")
+    query = args.get("query")
+
+    def _looks_garbled(text: str) -> bool:
+        if not text:
+            return True
+        has_hangul = any("\uac00" <= ch <= "\ud7a3" for ch in text)
+        has_ascii = any("a" <= ch.lower() <= "z" or ch.isdigit() for ch in text)
+        if not has_hangul and not has_ascii:
+            return True
+        # If most characters are non-alnum/non-Hangul, treat as garbled.
+        valid = sum(1 for ch in text if ch.isalnum() or ("\uac00" <= ch <= "\ud7a3"))
+        return valid < max(3, len(text) // 5) or "?" in text
+
+    def _english_flight_query(destination: str | None) -> str:
+        if destination:
+            return f"{destination} flight number and time"
+        return "flight number and time"
+
+    def _english_hotel_query(destination: str | None) -> str:
+        if destination:
+            return f"{destination} hotel address and check-in time"
+        return "hotel address and check-in time"
+
+    def _needs_english(text: str) -> bool:
+        return any("\uac00" <= ch <= "\ud7a3" for ch in text)
+
+    if not query:
+        if last_user_message and not _looks_garbled(last_user_message):
+            if wants_flight:
+                args["query"] = _english_flight_query(dest) if _needs_english(last_user_message) else last_user_message
+            elif any(k in last_user_message.lower() for k in ["호텔", "숙소", "주소", "체크인", "체크아웃"]):
+                args["query"] = _english_hotel_query(dest) if _needs_english(last_user_message) else last_user_message
+            else:
+                args["query"] = last_user_message
+        elif dest and wants_flight:
+            args["query"] = _english_flight_query(dest)
+        elif dest:
+            args["query"] = f"{dest} travel info"
+    else:
+        if _looks_garbled(query):
+            if last_user_message and not _looks_garbled(last_user_message):
+                args["query"] = _english_flight_query(dest) if wants_flight else last_user_message
+            elif dest and wants_flight:
+                args["query"] = _english_flight_query(dest)
+            elif dest:
+                args["query"] = f"{dest} travel info"
+        elif wants_flight and dest:
+            query_l = query.lower()
+            if "flight" not in query_l and "비행" not in query_l and "항공" not in query_l:
+                args["query"] = f"{dest} flight time {query}"
+    return args
 
 def get_current_time_str():
     kst = timezone(timedelta(hours=9))
@@ -71,7 +154,7 @@ base_executor_parser = PydanticOutputParser(pydantic_object=ExecutorResponse)
 def fix_json_with_llm(json_str: str, error: str, parser):
     """Custom fallback fixer for malformed JSON using the 27B model."""
     logger.info("Attempting to fix malformed JSON with Remote LLM...")
-    llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER)
+    llm = get_llm(model=settings.LLM_MODEL_PLANNER)
     
     prompt = f"""The following text was expected to be a valid JSON but parsing failed. 
 Error: {error}
@@ -116,10 +199,10 @@ Example 3: "Create a meeting tomorrow at 3pm" -> {{"mode": "simple", "reasoning"
 Example 4: "Check my schedule for next week and find a 1h slot for tennis" -> {{"mode": "complex", "reasoning": "Requires schedule analysis"}}
 """
 
-    llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER)
+    llm = get_llm(model=settings.LLM_MODEL_PLANNER)
     prompt = [SystemMessage(content=system_prompt), HumanMessage(content=last_user_message)]
     
-    logger.info("Invoking Router (27B)...")
+    logger.info(f"Invoking Router ({settings.LLM_MODEL_PLANNER})...")
     start_t = time.time()
     try:
         response = llm.invoke(prompt)
@@ -141,15 +224,49 @@ Example 4: "Check my schedule for next week and find a 1h slot for tennis" -> {{
         logger.error(f"Routing failed: {e}")
         return {"router_mode": "complex"}
 
+def _should_suppress_travel_facts(message: str) -> bool:
+    if not message:
+        return False
+    text = message.lower()
+    calendar_only = (
+        "캘린더", "calendar", "일정", "스케줄", "회의", "미팅", "약속",
+        "오늘 일정", "내일 일정", "이번 주 일정", "주간 일정", "월간 일정",
+        "today schedule", "tomorrow schedule", "weekly schedule",
+    )
+    travel_only = (
+        "여행", "여정", "오사카", "간사이", "항공", "비행", "호텔", "숙소",
+        "flight", "airline", "ticket", "itinerary", "osaka",
+    )
+    has_calendar = any(h in text for h in calendar_only)
+    has_travel = any(h in text for h in travel_only)
+    return has_calendar and not has_travel
+
+
+def _filter_travel_facts(facts: dict) -> dict:
+    travel_keys = {
+        "travel_destination",
+        "date_of_travel",
+        "travel_dates",
+        "flight_details",
+        "flight_info",
+        "accommodation",
+        "hotel",
+        "destination",
+    }
+    return {k: v for k, v in facts.items() if k not in travel_keys}
+
+
 def planner(state: AgentState):
     """The planner node using Remote LLM with Structured Output."""
     from app.services.memory import memory_service
     profile = memory_service.get_user_profile()
     facts = profile.get("facts", {})
+    messages = state["messages"]
+    last_user_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
+    if facts and _should_suppress_travel_facts(last_user_msg):
+        facts = _filter_travel_facts(facts)
     context_str = f"\nKeep in mind these user preferences: {json.dumps(facts)}" if facts else ""
     time_str = f"Current Time(Asia/Seoul): {get_current_time_str()}"
-
-    messages = state["messages"]
     
     # Check if we just came from a tool execution
     has_tool_result = any(isinstance(m, AIMessage) and m.tool_calls for m in reversed(messages))
@@ -159,8 +276,37 @@ def planner(state: AgentState):
     # More robust check for ToolMessage in history
     from langchain_core.messages import ToolMessage
     last_tool_msg = next((m for m in reversed(messages) if isinstance(m, ToolMessage)), None)
+    is_current_tool_result = bool(last_tool_msg and messages and messages[-1] is last_tool_msg)
+
+    # If a calendar tool just ran in the current turn, return its output directly.
+    if (
+        last_tool_msg
+        and messages
+        and messages[-1] is last_tool_msg
+        and last_tool_msg.name in {
+            "list_today_events",
+            "list_events_on_date",
+            "list_upcoming_events",
+            "list_weekly_events",
+            "list_calendars",
+        }
+    ):
+        tool_text = str(last_tool_msg.content)
+        return {
+            "messages": [AIMessage(content=tool_text)],
+            "planner_response": PlannerResponse(
+                mode="plan",
+                assistant_message=tool_text,
+                intent_description="Summarize calendar tool output",
+                needs_confirmation=False,
+                language="ko" if any(ord(c) > 0x1100 for c in tool_text) else "en",
+            ),
+            "mode": "plan",
+            "intent_summary": "Summarize calendar tool output",
+            "needs_confirmation": False,
+        }
     
-    remote_llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER)
+    remote_llm = get_llm(model=settings.LLM_MODEL_PLANNER)
     structured_llm = remote_llm.with_structured_output(PlannerResponse)
     
     system_prompt = f"""You are a Versatile AI Assistant Planner. 
@@ -198,7 +344,7 @@ EXAMPLES OF SEARCH DECISIONS:
 - User: "Hi there!" -> Mode: 'plan', message: "Hello! How can I help you today?"
 """
     # If we have tool results, the planner must likely summarize (mode='plan')
-    if last_tool_msg:
+    if is_current_tool_result:
         tool_data = str(last_tool_msg.content)
         logger.info(f"Planner received tool result ({len(tool_data)} chars).")
         system_prompt += f"\n\nCRITICAL: A tool was just executed with the following result:\n{tool_data}\n\nINSTRUCTION: The answer is likely in the text above. READ CAREFULLY. Use 'mode': 'plan' and summarize the information for the user immediately. DO NOT call the same tool again with the same query."
@@ -215,18 +361,17 @@ EXAMPLES OF SEARCH DECISIONS:
     prompt_messages = [SystemMessage(content=system_prompt)] + [m for m in messages if not isinstance(m, SystemMessage)]
     
     # Add a final context-aware language hint
-    last_user_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
     is_ko = any(ord(char) > 0x1100 for char in last_user_msg)
     lang_hint = "Korean" if is_ko else "English"
     prompt_messages.append(HumanMessage(content=f"[SYSTEM HINT: Output language must be {lang_hint}]"))
     
-    logger.info(f"Invoking Remote Planner ({settings.OLLAMA_MODEL_PLANNER}) with Structured Output")
+    logger.info(f"Invoking Remote Planner ({settings.LLM_MODEL_PLANNER}) with Structured Output")
     start_t = time.time()
     try:
         parsed = structured_llm.invoke(prompt_messages)
         
         # If the model still tries to execute despite having results, and it's a simple list, force plan
-        if last_tool_msg and parsed.mode == "execute":
+        if is_current_tool_result and parsed.mode == "execute":
              logger.warn("Model attempted to execute again immediately after tool call. Forcing 'plan' mode to avoid loop.")
              parsed.mode = "plan"
              
@@ -258,6 +403,7 @@ def executor_node(state: AgentState, config):
     """Transforms intent into tool calls using Structured Output fallback."""
     intent = state.get("intent_summary") or next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "List my events today")
     messages = state["messages"]
+    last_user_message = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
     time_str = f"Current Time(Asia/Seoul): {get_current_time_str()}"
     
     system_prompt = f"""You are a Tool-Calling Expert. Generate the exact tool call for the intent.
@@ -304,10 +450,11 @@ Intent: {intent}
 
     context_str = f"User Context: {facts}\n\nCalendar Name to ID Mapping: {json.dumps(calendar_name_to_id_map, ensure_ascii=False)}" + recent_events_str
 
-    llm = get_llm(model=settings.OLLAMA_MODEL_PLANNER).with_structured_output(ExecutorResponse)
+    executor_model = settings.LLM_MODEL_EXECUTOR or settings.LLM_MODEL_PLANNER
+    llm = get_llm(model=executor_model).with_structured_output(ExecutorResponse)
     prompt = [SystemMessage(content=system_prompt), HumanMessage(content=f"Follow intent: {intent}")]
     
-    logger.info("Invoking Remote Executor (27B) - Structured Output...")
+    logger.info(f"Invoking Remote Executor ({executor_model}) - Structured Output...")
     try:
         parsed = llm.invoke(prompt)
         logger.info(f"Executor Decision: {parsed.proposed_action.tool}({parsed.proposed_action.args})")
@@ -357,6 +504,14 @@ Intent: {intent}
                         parsed.proposed_action.args["calendar_id"] = full_id
                         logger.info(f"Guardrail auto-corrected truncated calendar_id: '{cal_id}' -> '{full_id}'")
                         break
+        # -----------------------------------------------------------------
+        # --- GUARDRAIL: Improve travel search specificity ---
+        if parsed.proposed_action.tool == "search_travel_info":
+            parsed.proposed_action.args = normalize_travel_search_query(
+                intent=intent,
+                last_user_message=last_user_message,
+                args=parsed.proposed_action.args,
+            )
         # -----------------------------------------------------------------
 
         from langchain_core.messages import ToolCall

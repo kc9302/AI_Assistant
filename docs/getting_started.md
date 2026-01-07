@@ -3,17 +3,10 @@
 ### 사전 요구 사항 (Prerequisites)
 
 이 앱은 **Ollama**를 모델 서버로 사용합니다. 최적의 성능을 위해 다음 모델들을 미리 다운로드해야 합니다:
-```bash
-ollama pull gemma3:27b        # Planner/Executor용 (고성능)
-ollama pull gemma3:4b         # Router용 (빠른 반응속도)
-ollama pull nomic-embed-text  # RAG 임베딩용 (필수)
-```
-> [!NOTE]
-> 27B 모델 실행을 위해 최소 16GB 이상의 VRAM을 권장합니다. RAG 기능을 위해 `nomic-embed-text` 모델이 반드시 필요합니다.
 
 ### 설치 및 설정
 
-1. **Backend 설정**
+1. **Backend 설치**
    ```bash
    cd backend
    python -m venv venv
@@ -21,21 +14,52 @@ ollama pull nomic-embed-text  # RAG 임베딩용 (필수)
    pip install -r requirements.txt
    ```
 
-2. **?? ?? ??**
-   `backend/.env.example`? ??? `backend/.env`? ?? ? ?? ?????.
+2. **환경변수 설정**
+   `backend/.env.example`를 `backend/.env`로 복사하고 아래 환경변수를 설정합니다.
    ```powershell
    copy backend\.env.example backend\.env
    ```
    ```text
    GOOGLE_API_KEY=your_google_ai_studio_api_key
    GOOGLE_CALENDAR_SCOPES=https://www.googleapis.com/auth/calendar
-   OLLAMA_HOST=http://localhost:11434
-   OLLAMA_MODEL=gemma3:27b
-   OLLAMA_MODEL_PLANNER=gemma3:27b
-   OLLAMA_KEEP_ALIVE=0
+   LLM_PROVIDER=ollama
+   LLM_BASE_URL=http://localhost:11434
+   LLM_MODEL=llama3.1:8b
+   LLM_MODEL_PLANNER=llama3.1:8b
+   LLM_MODEL_EXECUTOR=llama3.1:8b
+   LLM_KEEP_ALIVE=0
    ```
 
-3. **Google OAuth ??**Google OAuth 설정**
+   **프로파일별 환경 파일 사용 (권장)**
+   - `backend/.env.ollama`, `backend/.env.lmstudio`에 각 환경값을 유지합니다.
+   - 실행 시 프로파일을 선택해서 로드합니다.
+   ```powershell
+   cd backend
+   .\scripts\run_backend.ps1 -Profile lmstudio -Reload
+   ```
+
+   **LLM Provider 전환 (선택)**
+   ```text
+   # Provider switch (ollama | lmstudio)
+   LLM_PROVIDER=ollama
+   LLM_BASE_URL=http://localhost:11434
+   LLM_API_KEY=
+   LLM_EMBEDDING_MODEL=nomic-embed-text
+   LLM_MODEL=llama3.1:8b
+   LLM_MODEL_PLANNER=llama3.1:8b
+   LLM_MODEL_EXECUTOR=llama3.1:8b
+   ```
+   LM Studio 사용 시:
+   ```text
+   LLM_PROVIDER=lmstudio
+   LLM_BASE_URL=http://127.0.0.1:1234/v1
+   LLM_API_KEY=lm-studio
+   LLM_MODEL=zai-org/glm-4.6v-flash
+   LLM_MODEL_PLANNER=zai-org/glm-4.6v-flash
+   LLM_MODEL_EXECUTOR=zai-org/glm-4.6v-flash
+   ```
+
+3. **Google OAuth 설정**
    - [Google Cloud Console](https://console.cloud.google.com/)에서 **Google Calendar API**를 활성화합니다.
    - OAuth 2.0 클라이언트 ID를 생성하고 `credentials.json` 파일을 다운로드하여 `backend/` 폴더에 배치합니다.
    - 첫 실행 전 또는 인증 만료 시 아래 명령어로 인증을 수행합니다:
@@ -45,6 +69,7 @@ ollama pull nomic-embed-text  # RAG 임베딩용 (필수)
 
 4. **Backend 실행**
    ```bash
+   cd backend
    # 가상환경 활성화 후 실행
    .\venv\Scripts\activate
    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

@@ -9,5 +9,5 @@
 ### Backend
 - **FastAPI** (High-performance Python Web Server)
 - **LangChain** & **LangGraph** (Agent Orchestration & Workflow)
-- **Ollama** (LLM Server, Gemma3:27b / 4b)
+- **LLM Provider Adapter** (Ollama / LM Studio)
 - **Sqlite3** (Session Checkpoints & Context Store)

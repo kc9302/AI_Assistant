@@ -17,6 +17,6 @@ def test_status_endpoint(client):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
-    assert "ollama_host" in data
-    assert "ollama_model" in data
+    assert "llm_base_url" in data
+    assert "llm_model" in data
     assert "google_api_configured" in data
