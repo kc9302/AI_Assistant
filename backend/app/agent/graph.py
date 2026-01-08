@@ -193,10 +193,10 @@ Example 3: "Create a meeting tomorrow at 3pm" -> {{"mode": "simple", "reasoning"
 Example 4: "Check my schedule for next week and find a 1h slot for tennis" -> {{"mode": "complex", "reasoning": "Requires schedule analysis"}}
 """
 
-    llm = get_llm(model=settings.LLM_MODEL_PLANNER)
+    llm = get_llm(model=settings.LLM_MODEL_ROUTER)
     prompt = [SystemMessage(content=system_prompt), HumanMessage(content=last_user_message)]
     
-    logger.info(f"Invoking Router ({settings.LLM_MODEL_PLANNER})...")
+    logger.info(f"Invoking Router ({settings.LLM_MODEL_ROUTER})...")
     start_t = time.time()
     try:
         response = llm.invoke(prompt)

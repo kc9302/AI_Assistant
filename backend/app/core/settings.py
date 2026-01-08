@@ -12,9 +12,10 @@ class Settings(BaseSettings):
     LLM_API_KEY: str | None = None
     LLM_EMBEDDING_MODEL: str = "nomic-embed-text"
     LLM_MODEL: str = "gpt-oss:20b"
+    LLM_MODEL_ROUTER: str = "gpt-oss:20b" # Default to main if not specified
     LLM_MODEL_PLANNER: str = "gpt-oss:20b"
     LLM_MODEL_EXECUTOR: str = "gpt-oss:20b"
-    LLM_KEEP_ALIVE: str = "0" # Unload immediately after use
+    LLM_KEEP_ALIVE: str = "5m" # Keep in memory for 5 minutes
     
     # App
     PROJECT_NAME: str = "AI Assistant Agent"

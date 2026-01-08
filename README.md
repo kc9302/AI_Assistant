@@ -6,11 +6,12 @@
 
 - ✅ **LangGraph 기반 대화형 AI**: Ollama 서버의 gpt-oss:20b 모델을 활용한 고성능 싱글 모델 추론 엔진 (Manual JSON Parsing 적용)
 - ✅ **Google 캘린더 지능형 연동**: 자연어를 통한 일정 조회, 생성, 삭제 및 다중 캘린더 지원
-- ✅ **지능형 하이브리드 메모리 시스템**: 
+- ✅ **지능형 하이브리드 메모리 & RAG**: 
   - **세션 영속성 (Persistence)**: SqliteSaver 기반의 multi-turn 대화 상태 자동 저장 및 복구
-  - **세션 스냅샷 (관리 기능)**: 모든 대화 기록을 `data/sessions/YYYY-MM-DD/` 폴더에 일자별로 자동 백업 및 관리 편의성 제공
-  - **단기 컨텍스트 (ContextManager)**: 최근 작업물(ID, 제목 등)을 추적하여 "방금 잡은 일정 취소해줘"와 같은 지칭어 처리 지원
-  - **장기 기억 분석 (Memory Analysis)**: 대화 종료 후 **백그라운드에서 AI가 대화 내용을 자동 분석**하여 사용자의 선호도, 직업, 중요 인물 등 핵심 사실(Facts)을 `user_profile.json`에 영구 저장. 다음 대화 시 이 프로필이 시스템 프롬프트에 자동으로 주입되어 개인화된 응답 구현
+  - **세션 스냅샷 (관리 기능)**: 모든 대화 기록을 `data/sessions/YYYY-MM-DD/` 폴더에 일자별로 자동 백업
+  - **단기 컨텍스트 (ContextManager)**: 최근 작업물(ID, 제목 등)을 추적하여 "방금 잡은 일정 취소해줘" 처리 지원
+  - **장기 기억 분석 (Memory Analysis)**: 백그라운드에서 사용자의 핵심 사실(Facts)을 추출하여 `user_profile.json`에 저장
+  - **여행 지능형 RAG (Travel Retrieval)**: 오사카 여행 지침서(MD)를 FAISS로 인덱싱하여 비행기, 호텔 정보를 실시간 검색 및 답변 활용
 - ✅ **견고한 가드레일 (Guardrails)**: 
   - **ID 홀루시네이션 방지**: 캘린더 ID와 이벤트 ID의 혼동을 자동으로 감지하고 컨텍스트 기반으로 교정
   - **ID 절단(Truncation) 수정**: 응답 중 잘린 캘린더 ID(@group... 이후 누락 등)를 원본 맵과 대조하여 자동 복구
@@ -36,8 +37,10 @@ graph TB
         LLMProvider["LLM Provider Adapter"]
         
         subgraph Agent ["LangGraph Agent Engine"]
+            Router["Router - Model Classifier"]
             Planner["Planner - gpt-oss:20b"]
             Executor["Executor - Tool Caller"]
+            Router --> Planner
             Planner --> Executor
         end
         
@@ -119,8 +122,10 @@ LLM_EMBEDDING_MODEL=nomic-embed-text
 
 # Model selection (available on user's Ollama server)
 LLM_MODEL=gpt-oss:20b
+LLM_MODEL_ROUTER=gpt-oss:20b
 LLM_MODEL_PLANNER=gpt-oss:20b
 LLM_MODEL_EXECUTOR=gpt-oss:20b
+LLM_KEEP_ALIVE=5m
 # Alternative: llama3.1:8b, llama2:13b
 ```
 
@@ -174,4 +179,4 @@ Note: LM Studio must have a model loaded (Developer tab) before chat requests wi
 
 ---
 **현재 버전**: 1.1.0 (Stable)  
-**최근 업데이트**: 2026-01-07
+**최근 업데이트**: 2026-01-08

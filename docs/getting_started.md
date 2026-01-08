@@ -6,12 +6,21 @@
 
 ### 설치 및 설정
 
+0. **uv 설치 (Windows)**
+   ```powershell
+   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+   ```
+
 1. **Backend 설치**
    ```bash
-   cd backend
-   python -m venv venv
-   .\venv\Scripts\activate  # Windows
-   pip install -r requirements.txt
+      cd backend
+
+      # 1) Python 3.12 설치 및 가상환경 생성
+      uv venv venv --python 3.12
+      .\venv\Scripts\activate
+
+      # 2) 의존성 설치
+      uv pip install -r requirements.txt
    ```
 
 2. **환경변수 설정**
@@ -25,9 +34,10 @@
    LLM_PROVIDER=ollama
    LLM_BASE_URL=http://localhost:11434
    LLM_MODEL=gpt-oss:20b
+   LLM_MODEL_ROUTER=gpt-oss:20b
    LLM_MODEL_PLANNER=gpt-oss:20b
    LLM_MODEL_EXECUTOR=gpt-oss:20b
-   LLM_KEEP_ALIVE=0
+   LLM_KEEP_ALIVE=5m
    ```
 
    **프로파일별 환경 파일 사용 (권장)**
