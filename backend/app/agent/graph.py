@@ -170,8 +170,9 @@ def router_node(state: AgentState):
     Initial routing node. Tries Local (270M) first, falls back to Remote (27B).
     """
     profile = memory_service.get_user_profile()
+    user_info = profile.get("user", {})
     facts = profile.get("facts", {})
-    context_str = f"\nUser Context: {facts}" if facts else ""
+    context_str = f"\nUser: {user_info}\nFacts: {facts}" if user_info or facts else ""
     time_str = f"Current Time(Asia/Seoul): {get_current_time_str()}"
 
     messages = state["messages"]
@@ -257,12 +258,13 @@ def planner(state: AgentState):
     """The planner node using Remote LLM with Structured Output."""
     from app.services.memory import memory_service
     profile = memory_service.get_user_profile()
+    user_info = profile.get("user", {})
     facts = profile.get("facts", {})
     messages = state["messages"]
     last_user_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
     if facts and _should_suppress_travel_facts(last_user_msg):
         facts = _filter_travel_facts(facts)
-    context_str = f"\nKeep in mind these user preferences: {json.dumps(facts)}" if facts else ""
+    context_str = f"\nUser Information: {json.dumps(user_info, ensure_ascii=False)}\nUser Preferences/Facts: {json.dumps(facts, ensure_ascii=False)}" if user_info or facts else ""
     time_str = f"Current Time(Asia/Seoul): {get_current_time_str()}"
     
     # Check if we just came from a tool execution
@@ -482,6 +484,7 @@ Intent: {intent}
 """
 
     profile = memory_service.get_user_profile()
+    user_info = profile.get("user", {})
     facts = profile.get("facts", {})
     
     # Fetch available calendars and create a name-to-ID mapping
@@ -506,7 +509,7 @@ Intent: {intent}
          recent_events_str = "\n\n[RECENTLY CREATED EVENTS (Use these IDs for deletion)]:\n" + "\n".join([f"- Title: '{e['summary']}', ID: {e['event_id']}, Created: {e['created_at']}" for e in recent_events])
          system_prompt += recent_events_str
 
-    context_str = f"User Context: {facts}\n\nCalendar Name to ID Mapping: {json.dumps(calendar_name_to_id_map, ensure_ascii=False)}" + recent_events_str
+    context_str = f"User: {user_info}\nFacts: {facts}\n\nCalendar Name to ID Mapping: {json.dumps(calendar_name_to_id_map, ensure_ascii=False)}" + recent_events_str
 
     # Adding format instructions
     system_prompt += f"\n\nRESPONSE FORMAT:\nRespond ONLY in valid JSON. \n{base_executor_parser.get_format_instructions()}"

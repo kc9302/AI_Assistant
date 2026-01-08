@@ -34,9 +34,21 @@ class TestMemoryService(unittest.TestCase):
 
     def test_profile_initialization(self):
         profile = self.service.get_user_profile()
+        self.assertIn("user", profile)
+        self.assertEqual(profile["user"]["name"], "Unknown")
         self.assertIn("facts", profile)
         self.assertIn("history", profile)
         self.assertEqual(profile["history"], [])
+
+    def test_update_user_info(self):
+        self.service.update_user_info({"name": "Bob"})
+        profile = self.service.get_user_profile()
+        self.assertEqual(profile["user"]["name"], "Bob")
+        
+        self.service.update_user_info({"calendars": ["Main", "Work"]})
+        profile = self.service.get_user_profile()
+        self.assertEqual(profile["user"]["name"], "Bob")
+        self.assertEqual(profile["user"]["calendars"], ["Main", "Work"])
 
     def test_update_facts(self):
         self.service.update_user_profile({"name": "Alice"})

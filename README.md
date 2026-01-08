@@ -178,5 +178,5 @@ Note: LM Studio must have a model loaded (Developer tab) before chat requests wi
 *   [**테스트 질문 예시**](docs/test_questions.md)
 
 ---
-**현재 버전**: 1.1.0 (Stable)  
+**현재 버전**: 1.5.0 (Stable)  
 **최근 업데이트**: 2026-01-08

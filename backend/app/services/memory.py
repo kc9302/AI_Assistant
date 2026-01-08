@@ -19,11 +19,17 @@ class MemoryService:
         os.makedirs(SESSIONS_DIR, exist_ok=True)
         if not os.path.exists(USER_PROFILE_PATH):
             with open(USER_PROFILE_PATH, "w", encoding="utf-8") as f:
-                json.dump({"patterns": [], "facts": {}, "history": []}, f)
+                json.dump({
+                    "user": {"name": "Unknown", "calendars": []},
+                    "patterns": [],
+                    "facts": {},
+                    "history": []
+                }, f, ensure_ascii=False, indent=2)
 
     def _normalize_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(profile, dict):
             profile = {}
+        profile.setdefault("user", {"name": "Unknown", "calendars": []})
         profile.setdefault("patterns", [])
         profile.setdefault("facts", {})
         profile.setdefault("history", [])
@@ -115,6 +121,12 @@ class MemoryService:
         """Updates the persistent user profile facts."""
         profile = self._normalize_profile(self.get_user_profile())
         profile["facts"].update(new_facts)
+        self._save_profile(profile)
+
+    def update_user_info(self, new_info: Dict[str, Any]):
+        """Updates the persistent user information (name, calendars, etc.)."""
+        profile = self._normalize_profile(self.get_user_profile())
+        profile["user"].update(new_info)
         self._save_profile(profile)
 
     def add_user_pattern(self, pattern: str):
