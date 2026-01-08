@@ -32,11 +32,15 @@ class OllamaProvider(LLMProvider):
         elif settings.LLM_KEEP_ALIVE:
             ollama_kwargs["keep_alive"] = settings.LLM_KEEP_ALIVE
 
+        model_format = kwargs.pop("format", "json")
+        if model_format is None:
+            model_format = ""
+
         return ChatOllama(
             base_url=self._base_url,
             model=model,
             temperature=0.0,
-            format=kwargs.pop("format", "json"),
+            format=model_format,
             ollama_kwargs=ollama_kwargs,
             **kwargs,
         )

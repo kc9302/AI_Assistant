@@ -267,8 +267,6 @@ def planner(state: AgentState):
     
     # Check if we just came from a tool execution
     has_tool_result = any(isinstance(m, AIMessage) and m.tool_calls for m in reversed(messages))
-    last_message = messages[-1]
-    is_tool_message = hasattr(last_message, "content") and any(m.type == "tool" for m in messages[-2:] if hasattr(m, "type")) # Simplified check
     
     # More robust check for ToolMessage in history
     from langchain_core.messages import ToolMessage
@@ -301,7 +299,7 @@ def planner(state: AgentState):
         }
     
     logger.info(f"Invoking Remote Planner ({settings.LLM_MODEL_PLANNER}) - Flexible JSON Mode")
-    remote_llm = get_llm(model=settings.LLM_MODEL_PLANNER, format=None) # Disable Ollama strict JSON mode
+    remote_llm = get_llm(model=settings.LLM_MODEL_PLANNER, format="") # Disable Ollama strict JSON mode
     # structured_llm = remote_llm.with_structured_output(PlannerResponse) # Removed for OSS compatibility
     
     system_prompt = f"""You are a Versatile AI Assistant Planner. 
@@ -514,7 +512,7 @@ Intent: {intent}
     system_prompt += f"\n\nRESPONSE FORMAT:\nRespond ONLY in valid JSON. \n{base_executor_parser.get_format_instructions()}"
 
     executor_model = settings.LLM_MODEL_EXECUTOR or settings.LLM_MODEL_PLANNER
-    llm = get_llm(model=executor_model, format=None) # Disable Ollama strict JSON mode
+    llm = get_llm(model=executor_model, format="") # Disable Ollama strict JSON mode
     prompt = [SystemMessage(content=system_prompt), HumanMessage(content=f"Follow intent: {intent}")]
     
     logger.info(f"Invoking Remote Executor ({executor_model}) - Flexible JSON Mode...")
