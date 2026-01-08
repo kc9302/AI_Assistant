@@ -12,11 +12,62 @@ logger = logging.getLogger(__name__)
 KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "knowledge", "travel")
 VECTOR_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "travel_index")
 
+HASH_FILE_PATH = os.path.join(VECTOR_DB_PATH, "hash.txt")
+
 class TravelKnowledgeService:
     def __init__(self):
         self.embeddings = get_embeddings(settings.LLM_EMBEDDING_MODEL)
         self.vector_db = None
-        self._load_vector_db()
+        self._sync_index()
+
+    def _calculate_knowledge_hash(self) -> str:
+        """Calculates a hash based on the content of all files in KNOWLEDGE_DIR."""
+        import hashlib
+        if not os.path.exists(KNOWLEDGE_DIR):
+            return ""
+        
+        hasher = hashlib.md5()
+        # Sort files to ensure deterministic hash
+        for root, _, files in sorted(os.walk(KNOWLEDGE_DIR)):
+            for file in sorted(files):
+                if file.endswith(".md"):
+                    file_path = os.path.join(root, file)
+                    with open(file_path, "rb") as f:
+                        # Include file path and content in hash
+                        hasher.update(file.encode())
+                        while chunk := f.read(8192):
+                            hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _get_stored_hash(self) -> str:
+        """Reads the stored hash from disk."""
+        if os.path.exists(HASH_FILE_PATH):
+            try:
+                with open(HASH_FILE_PATH, "r") as f:
+                    return f.read().strip()
+            except Exception:
+                pass
+        return ""
+
+    def _save_hash(self, current_hash: str):
+        """Saves the current hash to disk."""
+        os.makedirs(os.path.dirname(HASH_FILE_PATH), exist_ok=True)
+        with open(HASH_FILE_PATH, "w") as f:
+            f.write(current_hash)
+
+    def _sync_index(self):
+        """Synchronizes the vector index if documents have changed or index is missing."""
+        current_hash = self._calculate_knowledge_hash()
+        stored_hash = self._get_stored_hash()
+        index_exists = os.path.exists(VECTOR_DB_PATH)
+
+        if not index_exists or current_hash != stored_hash:
+            logger.info("Changes detected or index missing, rebuilding travel index...")
+            self.build_index()
+            self._save_hash(current_hash)
+        else:
+            logger.info("No changes detected in knowledge base, loading existing travel index.")
+            self._load_vector_db()
 
     def _load_vector_db(self):
         """Loads the vector database from disk if it exists."""

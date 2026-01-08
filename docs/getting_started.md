@@ -12,15 +12,16 @@
    ```
 
 1. **Backend 설치**
-   ```bash
-      cd backend
+   ```powershell
+   # 1) 의존성 설치 및 가상환경 동기화 (루트 디렉토리에서 실행)
+   # .venv 가상환경이 없으면 자동으로 생성됩니다.
+   uv sync
 
-      # 1) Python 3.12 설치 및 가상환경 생성
-      uv venv venv --python 3.12
-      .\venv\Scripts\activate
-
-      # 2) 의존성 설치
-      uv pip install -r requirements.txt
+   # 2) 가상환경 활성화
+   # Windows (Powershell)
+   .venv\Scripts\activate
+   # macOS/Linux
+   source .venv/bin/activate
    ```
 
 2. **환경변수 설정**
@@ -78,18 +79,17 @@
      ```
 
 4. **Backend 실행**
-   ```bash
+   ```powershell
    cd backend
-   # 가상환경 활성화 후 실행
-   .\venv\Scripts\activate
-   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-   # 또는 한 줄로 실행
-   .\venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   # 가상환경 활성화 후 실행 (루트의 .venv 사용)
+   # ..\.venv\Scripts\activate
+   
+   # 또는 uv run을 사용하여 자동으로 가상환경 적용 및 실행
+   uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
    ```
 
 5. **Flutter 앱 실행**
-   ```bash
+   ```powershell
    cd client
    flutter pub get
    

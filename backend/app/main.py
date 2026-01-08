@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Application starting up...")
     from app.agent.llm import init_models
+    from app.services.travel import travel_knowledge_service
     import threading
     # Run priming in a separate thread to not block startup
     threading.Thread(target=init_models).start()
@@ -196,3 +197,4 @@ async def unload_model():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+ 
