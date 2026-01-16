@@ -11,6 +11,7 @@
   - **세션 스냅샷 (관리 기능)**: 모든 대화 기록을 `data/sessions/YYYY-MM-DD/` 폴더에 일자별로 자동 백업
   - **단기 컨텍스트 (ContextManager)**: 최근 작업물(ID, 제목 등)을 추적하여 "방금 잡은 일정 취소해줘" 처리 지원
   - **장기 기억 분석 (Memory Analysis)**: 백그라운드에서 사용자의 핵심 사실(Facts)을 추출하여 `user_profile.json`에 저장
+  - **회의록 요약 및 자동 일정 등록 (v1.6.0 NEW)**: 복잡한 회의록 원문을 분석하여 요약, 결정 사항을 추출하고 사용자 승인 후 일정 일괄 등록
   - **여행 지능형 RAG (Travel Retrieval)**: 오사카 여행 지침서(MD)를 FAISS로 인덱싱하여 비행기, 호텔 정보를 실시간 검색 및 답변 활용
 - ✅ **견고한 가드레일 (Guardrails)**: 
   - **ID 홀루시네이션 방지**: 캘린더 ID와 이벤트 ID의 혼동을 자동으로 감지하고 컨텍스트 기반으로 교정
@@ -178,5 +179,5 @@ Note: LM Studio must have a model loaded (Developer tab) before chat requests wi
 *   [**테스트 질문 예시**](docs/test_questions.md)
 
 ---
-**현재 버전**: 1.5.0 (Stable)  
-**최근 업데이트**: 2026-01-08
+**현재 버전**: 1.6.0 (Stable)  
+**최근 업데이트**: 2026-01-16

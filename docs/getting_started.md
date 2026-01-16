@@ -75,8 +75,9 @@
    - OAuth 2.0 클라이언트 ID를 생성하고 `credentials.json` 파일을 다운로드하여 `backend/` 폴더에 배치합니다.
    - 첫 실행 전 또는 인증 만료 시 아래 명령어로 인증을 수행합니다:
      ```bash
-     python scripts/reauth.py
+     uv run python scripts/reauth.py
      ```
+     *(브라우저 실행이 불가능한 환경에서는 콘솔에 인증 코드를 입력하는 방식으로 자동 전환됩니다.)*
 
 4. **Backend 실행**
    ```powershell
