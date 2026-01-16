@@ -24,6 +24,13 @@ def summarize_meeting_notes(
     """
     회의록 원문을 입력받아 핵심 내용을 요약하고, 참석자, 주요 안건, 결정 사항, 액션 아이템(일정 포함)을 추출합니다.
     """
+    if not meeting_notes or len(meeting_notes.strip()) < 10:
+        logger.warning(f"[MEETING_TOOL] Received empty or very short meeting_notes: '{meeting_notes}'")
+        return json.dumps({
+            "summary": "입력된 회의록 내용이 너무 적거나 없습니다. 회의록 전문을 입력해 주세요.",
+            "action_items": []
+        }, ensure_ascii=False)
+
     now = datetime.now()
     current_date = meeting_date or now.strftime("%Y-%m-%d")
     current_weekday = ["월", "화", "수", "목", "금", "토", "일"][now.weekday()]

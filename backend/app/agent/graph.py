@@ -312,22 +312,33 @@ def planner(state: AgentState):
                         "pending_calendar_events": events,
                         "last_meeting_summary": summary_text
                     }
+                else:
+                    # FALLBACK: If tool result is empty or not helpful, explain and ask for natural answer
+                    logger.warn("summarize_meeting_notes returned no events. Forcing natural summary.")
+                    summary_prompt = [
+                        SystemMessage(content="A tool was executed to summarize meeting notes but returned empty data. Summarize the conversation history for the user and ask for the specific meeting content if it was missing. DO NOT OUTPUT JSON. Answer in Korean."),
+                        HumanMessage(content=f"Last tool result: {last_tool_msg.content}")
+                    ]
+                    summary_res = get_llm().invoke(summary_prompt)
+                    return {
+                        "messages": [summary_res],
+                        "mode": "plan",
+                        "intent_summary": "Ask for meeting content clarification"
+                    }
             except Exception as e:
                 logger.error(f"Error parsing meeting summary result: {e}")
 
-        tool_text = str(last_tool_msg.content)
+        # Final Fallback for ALL tool results
+        logger.info(f"Summarizing tool result for user...")
+        summary_prompt = [
+            SystemMessage(content="You are an AI assistant. Summarize the tool result below for the user. DO NOT output JSON. Use natural Korean. If the result is a meeting summary with calendar events, explain what was found and ask for confirmation."),
+            HumanMessage(content=f"Tool: {last_tool_msg.name}\nOutput: {str(last_tool_msg.content)}")
+        ]
+        summary_res = get_llm().invoke(summary_prompt)
         return {
-            "messages": [AIMessage(content=tool_text)],
-            "planner_response": PlannerResponse(
-                mode="plan",
-                assistant_message=tool_text,
-                intent_description="Summarize calendar tool output",
-                needs_confirmation=False,
-                language="ko" if any(ord(c) > 0x1100 for c in tool_text) else "en",
-            ),
+            "messages": [summary_res],
             "mode": "plan",
-            "intent_summary": "Summarize calendar tool output",
-            "needs_confirmation": False,
+            "intent_summary": f"Summarize {last_tool_msg.name}"
         }
     
     logger.info(f"Invoking Remote Planner ({settings.LLM_MODEL_PLANNER}) - Flexible JSON Mode")
@@ -368,8 +379,9 @@ LONG-TERM KNOWLEDGE:
 SELECTIVE MEMORY & KNOWLEDGE RETRIEVAL RULES:
 1. If the request is about your upcoming Osaka trip and the current context lacks details (e.g., flight times, hotel names, specific itinerary), use 'execute' and call 'search_travel_info'.
 2. If the request requires specific details from a past conversation (e.g., "What was the name of the place we talked about?"), set 'mode': 'execute' and call 'retrieve_past_session'.
-3. If 'User Facts', 'Past Conversations' summaries, or search results already provide enough context, do NOT call tools. Just respond.
-4. Use 'search_travel_info' for external travel documents, and 'retrieve_past_session' for specific past chats.
+3. If the user provides meeting notes (e.g., transcript, bullet points) AND asks for a summary or to register schedules, you MUST set 'mode': 'execute' and 'intent_description': 'Summarize meeting and extract calendar events'. DO NOT summarize it yourself in 'assistant_message'.
+4. If 'User Facts', 'Past Conversations' summaries, or search results already provide enough context, do NOT call tools. Just respond.
+5. Use 'search_travel_info' for external travel documents, and 'retrieve_past_session' for specific past chats.
 
 EXAMPLES OF SEARCH DECISIONS:
 - User: "When is my flight to Osaka?" -> Mode: 'execute', Tool: 'search_travel_info', Intent: "Check flight schedule to Osaka"
@@ -379,8 +391,13 @@ EXAMPLES OF SEARCH DECISIONS:
 
 CONFIRMATION HANDLING:
 - If the user is responding to a question about registering events from a meeting summary:
-    - If they say "Yes" or similar: set 'mode': 'execute' and 'intent_description': 'Confirm and register all pending_calendar_events'.
-    - If they say "No" or similar: set 'mode': 'plan' and 'assistant_message': '알겠습니다. 일정을 등록하지 않았습니다.'
+    - If they say "Yes", "응", "그래", "해줘", "등록해줘" or similar: set 'mode': 'execute' and 'intent_description': 'Confirm and register all pending_calendar_events'.
+    - If they say "No", "아니", "하지마" or similar: set 'mode': 'plan' and 'assistant_message': '알겠습니다. 일정을 등록하지 않았습니다.'
+
+EXAMPLES OF CONFIRMATION DECISIONS:
+- User: "응" (after summary) -> Mode: 'execute', Intent: "Confirm and register all pending_calendar_events"
+- User: "좋아 등록해줘" -> Mode: 'execute', Intent: "Confirm and register all pending_calendar_events"
+- User: "아니 됐어" -> Mode: 'plan', Assistant: "알겠습니다. 일정을 등록하지 않았습니다."
 """
     # If we have tool results, the planner must likely summarize (mode='plan')
     if is_current_tool_result:
@@ -417,14 +434,16 @@ CONFIRMATION HANDLING:
     try:
         response = remote_llm.invoke(prompt_messages)
         content = response.content
+        
         json_str = extract_json(content)
         if not json_str:
+            logger.error(f"Planner failed to find JSON in response: {content}")
             raise ValueError("Planner returned empty or invalid JSON string.")
 
         try:
             parsed = base_planner_parser.parse(json_str)
         except Exception as parse_err:
-            logger.warn(f"Planner JSON parse failed: {parse_err}. Attempting fix...")
+            logger.warn(f"Planner JSON parse failed: {parse_err}. Raw content: {json_str}. Attempting fix...")
             parsed = fix_json_with_llm(json_str, str(parse_err), base_planner_parser)
         
         # If the model still tries to execute despite having results, and it's a simple list, force plan
@@ -443,15 +462,40 @@ CONFIRMATION HANDLING:
                  logger.info(f"Forced natural summary generated: {parsed.assistant_message[:100]}...")
 
         logger.info(f"Planner complete in {time.time()-start_t:.2f}s. Mode: {parsed.mode}")
-        logger.info(f"Final AI Response (Planner): {parsed.assistant_message}")
         
-        return {
-            "messages": [AIMessage(content=parsed.assistant_message)],
+        # If mode is execute, we don't want to show the assistant's internal reasoning/draft to the user.
+        final_assistant_msg = parsed.assistant_message
+        updates = {
+            "messages": [AIMessage(content="")], # Clear for execute mode
             "planner_response": parsed,
             "mode": parsed.mode,
             "intent_summary": parsed.intent_description,
             "needs_confirmation": parsed.needs_confirmation
         }
+
+        if parsed.mode == "execute":
+             if not parsed.intent_description or len(parsed.intent_description) < 10:
+                  parsed.intent_description = parsed.assistant_message
+             
+             # PERSISTENCE: If user is providing meeting notes, save them to state
+             if any(kw in last_user_msg.lower() for kw in ["회의록", "정리", "요약", "meeting", "transcript"]):
+                  if len(last_user_msg) > 50:
+                       updates["raw_meeting_notes"] = last_user_msg
+                       logger.info(f"Persisted raw_meeting_notes to state ({len(last_user_msg)} chars)")
+             
+             # CONFIRMATION: If user says 'Yes' to registration, ensure the intent is mapped correctly
+             if any(kw in last_user_msg.lower() for kw in ["응", "그래", "해줘", "좋아", "yes", "confirm", "등록"]):
+                  # Check if we were just asking for confirmation (last message from assistant)
+                  last_assistant_msg = next((m.content for m in reversed(messages) if isinstance(m, AIMessage)), "")
+                  if "등록하시겠습니까" in last_assistant_msg or "register" in last_assistant_msg.lower():
+                       parsed.intent_description = "Confirm and register all pending_calendar_events"
+                       updates["intent_summary"] = parsed.intent_description
+                       logger.info("Planner override: User confirmed registration.")
+
+        logger.info(f"Final AI Response (Planner): {final_assistant_msg}")
+        
+        updates["messages"] = [AIMessage(content=final_assistant_msg)]
+        return updates
     except Exception as e:
         logger.error(f"Planner error: {e}")
         friendy_msg = "죄송합니다. 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
@@ -473,6 +517,26 @@ def executor_node(state: AgentState, config):
         args_schema = t.args_schema.schema() if t.args_schema else {}
         tool_signatures.append(f"- {t.name}: {t.description}\n  Args: {json.dumps(args_schema.get('properties', {}), ensure_ascii=False)}")
     tool_sigs_str = "\n".join(tool_signatures)
+
+    pending_events = state.get('pending_calendar_events') or []
+    logger.info(f"[DEBUG] executor_node - START - intent: {intent}, pending_events count: {len(pending_events)}")
+
+    # --- RECOVERY LOGIC: If state is lost but intent is confirmation, try re-extracting from history ---
+    if (not pending_events or len(pending_events) == 0) and 'pending_calendar_events' in (intent or ""):
+         logger.info("[RECOVERY] pending_events is empty but intent suggests confirmation. Searching history...")
+         from langchain_core.messages import ToolMessage
+         for m in reversed(messages):
+             if isinstance(m, ToolMessage) and m.name == "summarize_meeting_notes":
+                 try:
+                     res = json.loads(m.content)
+                     pending_events = [item for item in res.get("action_items", []) if item.get("is_calendar_event")]
+                     logger.info(f"[RECOVERY] Successfully re-extracted {len(pending_events)} events from ToolMessage.")
+                     break
+                 except Exception as e:
+                     logger.error(f"[RECOVERY] Failed to parse ToolMessage: {e}")
+    
+    if not pending_events:
+        pending_events = []
 
     system_prompt = f"""You are a Tool-Calling Expert. Generate the exact tool call for the intent.
 Current Time(Asia/Seoul): {get_current_time_str()}
@@ -514,9 +578,24 @@ EXAMPLES:
 5. Intent: "2일 뒤 일정 보여줘"
    Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-09", "end_date": "2026-01-10"}}}}, "reasoning": "Calculate date (today+2) and list."}}
 
+6. Intent: "Summarize meeting and extract calendar events" (based on provided notes)
+   Response: {{"proposed_action": {{"tool": "summarize_meeting_notes", "args": {{"meeting_notes": "FULL_TEXT_FROM_HISTORY"}}}}, "reasoning": "Extract structured data from the meeting history."}}
+   **CRITICAL**: You MUST provide the full meeting text in 'meeting_notes'. 
+   - Check 'PENDING_RAW_NOTES' below. If it contains the meeting text, USE IT.
+   - Otherwise, find the original text in the message history. DO NOT leave it empty.
+
+PENDING_RAW_NOTES: {state.get('raw_meeting_notes', 'None')}
+
 Intent: {intent}
 
-PENDING EVENTS: {json.dumps(state.get('pending_calendar_events', []), ensure_ascii=False)}
+PENDING EVENTS: {json.dumps(pending_events, ensure_ascii=False)}
+
+7. Intent: "Confirm and register all pending_calendar_events" (with PENDING EVENTS provided)
+   PENDING EVENTS: [{{"suggested_calendar_title": "미팅 A", "suggested_start_time": "2026-01-20T10:00:00"}}, {{"suggested_calendar_title": "미팅 B", "suggested_start_time": "2026-01-21T14:00:00"}}]
+   Response: {{"proposed_actions": [
+       {{"tool": "create_event", "args": {{"summary": "미팅 A", "start_time": "2026-01-20T10:00:00", "end_time": "2026-01-20T11:00:00"}}}},
+       {{"tool": "create_event", "args": {{"summary": "미팅 B", "start_time": "2026-01-21T14:00:00", "end_time": "2026-01-21T15:00:00"}}}}
+   ], "reasoning": "Register all extracted events as confirmed."}}
 
 CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you MUST generate multiple tool calls to 'create_event' for EACH item in 'PENDING EVENTS'.
 """
@@ -557,7 +636,8 @@ CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you
     llm = get_llm(model=executor_model, format="") # Disable Ollama strict JSON mode
     prompt = [SystemMessage(content=system_prompt), HumanMessage(content=f"Follow intent: {intent}")]
     
-    logger.info(f"Invoking Remote Executor ({executor_model}) - Flexible JSON Mode...")
+    logger.info(f"Invoking Remote Executor ({executor_model}) - Prompt Length: {len(system_prompt)}")
+    logger.info(f"[DEBUG] executor_node - PENDING EVENTS in prompt: {json.dumps(pending_events, ensure_ascii=False)}")
     try:
         response = llm.invoke(prompt)
         content = response.content
@@ -646,8 +726,17 @@ CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you
              logger.warning("[EXECUTOR] No actions found in parsed response!")
              return {"messages": [AIMessage(content="도구 명령을 생성하는 데 실패했습니다.")], "mode": "plan"}
 
+        # --- TASK-DRAIVEN OVERRIDE: Force [WS] Inc. for meeting registrations ---
+        ws_calendar_id = calendar_name_to_id_map.get("[WS] Inc.")
+        is_meeting_reg = (intent == 'Confirm and register all pending_calendar_events') or ("Summarize meeting" in intent)
+        
         tool_calls = []
         for i, action in enumerate(all_actions):
+            # Apply override if it's a creation event and we have the target calendar ID
+            if action.tool == "create_event" and is_meeting_reg and ws_calendar_id:
+                action.args["calendar_id"] = ws_calendar_id
+                logger.info(f"Overriding calendar_id to '[WS] Inc.' ({ws_calendar_id}) for meeting event.")
+                
             tool_calls.append(ToolCall(
                 name=action.tool,
                 args=action.args,
@@ -659,7 +748,7 @@ CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you
         # If we successfully registered pending events, clear them from state
         updates = {"messages": [AIMessage(content="", tool_calls=tool_calls)]}
         if intent == 'Confirm and register all pending_calendar_events':
-            updates["pending_calendar_events"] = None
+            updates["pending_calendar_events"] = None # Clear state
             
         return updates
 

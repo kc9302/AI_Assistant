@@ -138,47 +138,66 @@ async def chat(body: dict):
         # Should handle list of messages format too if needed
         return {"error": "Invalid input format. Expected 'message' field."}
         
-    # Run the graph
-    try:
-        config = {"configurable": {"thread_id": thread_id}}
-        
-        logger.info(f"Invoking graph for thread_id={thread_id}. Message: {user_input[:100]}...")
-        
-        async with aiosqlite.connect("./checkpoints.db") as conn:
-            if not hasattr(conn, "is_alive"):
-                conn.is_alive = lambda: True
-            checkpointer = AsyncSqliteSaver(conn)
-            graph = get_graph(checkpointer=checkpointer)
-            final_state = await graph.ainvoke(inputs, config=config)
-        
-        # Extract the last AI message
-        ai_message = final_state["messages"][-1]
-        
-        # New: Get structured data from state if available (from planner)
-        mode = final_state.get("mode", "plan")
-        needs_confirmation = final_state.get("needs_confirmation", False)
-        
-        logger.info(f"Graph execution complete. Model Result -> Mode: {mode}, ConfReq: {needs_confirmation}")
-        
-        if thread_id:
-            from app.services.memory import memory_service, memory_analyzer
-            memory_service.save_session(thread_id, final_state["messages"])
-            # In a real app, this would be a background task (e.g., FastAPI's BackgroundTasks)
-            import asyncio
-            asyncio.create_task(memory_analyzer.analyze_and_update(final_state["messages"]))
+    MAX_RETRIES = 1
+    timeout_seconds = 180 # 3 minutes
+    
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            logger.info(f"Invoking graph for thread_id={thread_id} (Attempt {attempt+1}). Message: {user_input[:100]}...")
+            
+            async with aiosqlite.connect("./checkpoints.db") as conn:
+                if not hasattr(conn, "is_alive"):
+                    conn.is_alive = lambda: True
+                checkpointer = AsyncSqliteSaver(conn)
+                graph = get_graph(checkpointer=checkpointer)
+                
+                # Use wait_for to implement the 3-minute timeout
+                final_state = await asyncio.wait_for(
+                    graph.ainvoke(inputs, config=config),
+                    timeout=timeout_seconds
+                )
+            
+            # Extract the last AI message
+            ai_message = final_state["messages"][-1]
+            mode = final_state.get("mode", "plan")
+            needs_confirmation = final_state.get("needs_confirmation", False)
+            
+            logger.info(f"Graph execution complete. Model Result -> Mode: {mode}, ConfReq: {needs_confirmation}")
+            
+            if thread_id:
+                from app.services.memory import memory_service, memory_analyzer
+                memory_service.save_session(thread_id, final_state["messages"])
+                asyncio.create_task(memory_analyzer.analyze_and_update(final_state["messages"]))
 
-        logger.info(f"Final Response to Client: {ai_message.content[:200]}...")
-        
-        return {
-            "response": ai_message.content,
-            "mode": mode,
-            "needs_confirmation": needs_confirmation,
-            "thread_id": thread_id,
-            "confirmation_id": final_state.get("confirmation_id")
-        }
-    except Exception as e:
-        logger.exception(f"Graph execution failed for thread_id={thread_id}")
-        return {"error": str(e)}
+            return {
+                "response": ai_message.content,
+                "mode": mode,
+                "needs_confirmation": needs_confirmation,
+                "thread_id": thread_id,
+                "confirmation_id": final_state.get("confirmation_id")
+            }
+            
+        except asyncio.TimeoutError:
+            logger.error(f"Graph execution TIMED OUT after {timeout_seconds}s (Attempt {attempt+1})")
+            if attempt < MAX_RETRIES:
+                logger.info("Re-initializing model (unloading) and retrying...")
+                try:
+                    from app.agent.llm import unload_model as unload_provider_model
+                    unload_provider_model()
+                    await asyncio.sleep(2) # Brief pause for cleanup
+                except Exception as e:
+                    logger.error(f"Failed to unload model during retry: {e}")
+                continue # Retry
+            else:
+                return {"error": "Response took too long (over 3 mins). Please try again with a shorter request."}
+                
+        except Exception as e:
+            logger.exception(f"Graph execution failed for thread_id={thread_id} (Attempt {attempt+1})")
+            if attempt < MAX_RETRIES:
+                logger.info("Generic error occurred. Retrying once...")
+                continue
+            return {"error": str(e)}
 
 @app.post("/api/unload")
 async def unload_model():

@@ -37,3 +37,4 @@ class ExecutorResponse(BaseModel):
     """The structured response from the specialized Executor model."""
     proposed_action: Optional[ProposedAction] = Field(default=None, description="The final tool call to execute")
     proposed_actions: Optional[List[ProposedAction]] = Field(default=None, description="Multiple tool calls to execute (if applicable)")
+    reasoning: Optional[str] = Field(default=None, description="Brief explanation for the selected tool(s)")
