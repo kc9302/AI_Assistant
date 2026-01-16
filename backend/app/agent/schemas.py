@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Literal, Dict, Any
+from typing import Optional, Literal, Dict, Any, List
 
 class ProposedAction(BaseModel):
     """Represents a tool call proposed by the agent."""
@@ -35,4 +35,5 @@ class PlannerResponse(BaseModel):
 
 class ExecutorResponse(BaseModel):
     """The structured response from the specialized Executor model."""
-    proposed_action: ProposedAction = Field(description="The final tool call to execute")
+    proposed_action: Optional[ProposedAction] = Field(default=None, description="The final tool call to execute")
+    proposed_actions: Optional[List[ProposedAction]] = Field(default=None, description="Multiple tool calls to execute (if applicable)")

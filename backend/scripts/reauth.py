@@ -30,8 +30,12 @@ def main():
 
     try:
         flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-        # Use run_local_server which will open a browser
-        creds = flow.run_local_server(port=0)
+        # Attempt to run local server, fallback to console if it fails
+        try:
+            creds = flow.run_local_server(port=0)
+        except Exception:
+            print("Could not open browser. Falling back to console-based authentication...")
+            creds = flow.run_console()
         
         # Save the credentials for the next run
         with open(TOKEN_FILE, "w") as token:

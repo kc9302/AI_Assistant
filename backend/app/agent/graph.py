@@ -15,6 +15,7 @@ from app.tools.calendar import (
 )
 from app.tools.memory_tools import memory_tools
 from app.tools.travel_tools import travel_tools
+from app.tools.meeting_tools import summarize_meeting_notes # Added
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,8 @@ tools = [
     list_calendars,
     list_events,
     create_event,
-    delete_event
+    delete_event,
+    summarize_meeting_notes # Added
 ] + memory_tools + travel_tools
 
 from langchain_core.output_parsers import PydanticOutputParser
@@ -283,8 +285,36 @@ def planner(state: AgentState):
         and last_tool_msg.name in {
             "list_events",
             "list_calendars",
+            "summarize_meeting_notes",
         }
     ):
+        if last_tool_msg.name == "summarize_meeting_notes":
+            try:
+                result_data = json.loads(last_tool_msg.content)
+                summary_text = result_data.get("summary", "")
+                events = [item for item in result_data.get("action_items", []) if item.get("is_calendar_event")]
+                
+                if events:
+                    event_list_str = "\n".join([f"- {e.get('suggested_calendar_title')} ({e.get('suggested_start_time')})" for e in events])
+                    assistant_msg = f"📋 **회의록 요약**\n\n{summary_text}\n\n📅 **발견된 일정 ({len(events)}개)**:\n{event_list_str}\n\n이 일정들을 캘린더에 등록하시겠습니까?"
+                    return {
+                        "messages": [AIMessage(content=assistant_msg)],
+                        "planner_response": PlannerResponse(
+                            mode="plan",
+                            assistant_message=assistant_msg,
+                            intent_description="Summarize meeting and ask for calendar registration",
+                            needs_confirmation=True,
+                            language="ko"
+                        ),
+                        "mode": "plan",
+                        "intent_summary": "Meeting summary confirmation",
+                        "needs_confirmation": True,
+                        "pending_calendar_events": events,
+                        "last_meeting_summary": summary_text
+                    }
+            except Exception as e:
+                logger.error(f"Error parsing meeting summary result: {e}")
+
         tool_text = str(last_tool_msg.content)
         return {
             "messages": [AIMessage(content=tool_text)],
@@ -346,6 +376,11 @@ EXAMPLES OF SEARCH DECISIONS:
 - User: "Where is my hotel?" -> Mode: 'execute', Tool: 'search_travel_info', Intent: "Check hotel address in Osaka"
 - User: "What did we say about the budget last time?" -> Mode: 'execute', Tool: 'retrieve_past_session', Intent: "Fetch previous chat about budget"
 - User: "Hi there!" -> Mode: 'plan', message: "Hello! How can I help you today?"
+
+CONFIRMATION HANDLING:
+- If the user is responding to a question about registering events from a meeting summary:
+    - If they say "Yes" or similar: set 'mode': 'execute' and 'intent_description': 'Confirm and register all pending_calendar_events'.
+    - If they say "No" or similar: set 'mode': 'plan' and 'assistant_message': '알겠습니다. 일정을 등록하지 않았습니다.'
 """
     # If we have tool results, the planner must likely summarize (mode='plan')
     if is_current_tool_result:
@@ -423,7 +458,6 @@ EXAMPLES OF SEARCH DECISIONS:
         return {"messages": [AIMessage(content=friendy_msg)], "mode": "plan"}
 
 def executor_node(state: AgentState, config):
-    """Transforms intent into tool calls using Structured Output fallback."""
     intent = state.get("intent_summary") or next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "List my events today")
     messages = state["messages"]
     last_user_message = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
@@ -481,13 +515,17 @@ EXAMPLES:
    Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-09", "end_date": "2026-01-10"}}}}, "reasoning": "Calculate date (today+2) and list."}}
 
 Intent: {intent}
+
+PENDING EVENTS: {json.dumps(state.get('pending_calendar_events', []), ensure_ascii=False)}
+
+CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you MUST generate multiple tool calls to 'create_event' for EACH item in 'PENDING EVENTS'.
 """
 
     profile = memory_service.get_user_profile()
     user_info = profile.get("user", {})
     facts = profile.get("facts", {})
     
-    # Fetch available calendars and create a name-to-ID mapping
+    # Fetch available calendars and create a name-to-id mapping
     calendar_name_to_id_map = {}
     try:
         service = get_calendar_service()
@@ -501,6 +539,7 @@ Intent: {intent}
         # Fallback if map creation fails
         calendar_name_to_id_map = {"primary": "primary"} # Ensure at least primary is available
 
+    # --- RECENT EVENTS CONTEXT INJECTION ---
     # --- RECENT EVENTS CONTEXT INJECTION ---
     thread_id = config.get("configurable", {}).get("thread_id", "default")
     recent_events = context_manager.get_recent_events(thread_id)
@@ -532,7 +571,10 @@ Intent: {intent}
              logger.warn(f"Executor JSON parse failed: {parse_err}. Attempting fix...")
              parsed = fix_json_with_llm(json_str, str(parse_err), base_executor_parser)
 
-        logger.info(f"Executor Decision: {parsed.proposed_action.tool}({parsed.proposed_action.args})")
+        if parsed.proposed_action:
+             logger.info(f"Executor Decision: {parsed.proposed_action.tool}({parsed.proposed_action.args})")
+        elif parsed.proposed_actions:
+             logger.info(f"Executor Decision: Multiple ({len(parsed.proposed_actions)} actions)")
         # The original code had a return here, but the guardrails and toolcall creation were after it.
         # This implies the return was meant to be after the guardrails.
         # I will keep the guardrails and toolcall creation, and move the return to the end of the function.
@@ -543,32 +585,32 @@ Intent: {intent}
 
     if parsed:
         # --- GUARDRAIL: Fix ID Hallucination (Calendar ID vs Event ID) ---
-        if parsed.proposed_action.tool == "delete_event":
-            eid = parsed.proposed_action.args.get("event_id", "")
-            
-            # 1. Triggers: Explicit "Recent" intent or suspicious ID format
-            recent_keywords = ["방금", "just", "recent", "금방", "그 일정", "that event"]
-            is_recent_intent = any(k in intent.lower() for k in recent_keywords)
-            is_suspicious_id = "@" in eid or len(eid) > 50 # Calendar IDs are usually emails
-            
-            # 2. Action: Force Context Lookup
-            if (is_recent_intent or is_suspicious_id) and recent_events:
-                corrected_id = recent_events[0]['event_id']
-                parsed.proposed_action.args['event_id'] = corrected_id
+        if parsed.proposed_action:
+            if parsed.proposed_action.tool == "delete_event":
+                eid = parsed.proposed_action.args.get("event_id")
                 
-                # Auto-fill calendar_id from context if available
-                ctx_cal_id = recent_events[0].get('calendar_id')
-                if ctx_cal_id:
-                     parsed.proposed_action.args['calendar_id'] = ctx_cal_id
-                     logger.info(f"Guardrail auto-filled calendar_id: '{ctx_cal_id}' from context.")
+                # 1. Triggers: Explicit "Recent" intent or suspicious ID format
+                recent_keywords = ["방금", "just", "recent", "금방", "그 일정", "that event"]
+                is_recent_intent = any(k in intent.lower() for k in recent_keywords)
+                is_suspicious_id = (isinstance(eid, str) and len(eid) < 15) or (not eid)
                 
-                logger.info(f"Guardrail applied. Swapped ID to '{corrected_id}'.")
-            
-            elif is_suspicious_id and not recent_events:
-                 logger.warning(f"Guardrail detected suspicious ID '{eid}' but NO recent events found in context to swap.")
+                # 2. Action: Force Context Lookup
+                if (is_recent_intent or is_suspicious_id) and recent_events:
+                    corrected_id = recent_events[0]['event_id']
+                    parsed.proposed_action.args["event_id"] = corrected_id
+                    
+                    ctx_cal_id = recent_events[0].get('calendar_id')
+                    if ctx_cal_id:
+                         parsed.proposed_action.args['calendar_id'] = ctx_cal_id
+                         logger.info(f"Guardrail auto-filled calendar_id: '{ctx_cal_id}' from context.")
+                    
+                    logger.info(f"Guardrail applied. Swapped ID to '{corrected_id}'.")
+                
+                elif is_suspicious_id and not recent_events:
+                     logger.warning(f"Guardrail detected suspicious ID '{eid}' but NO recent events found in context to swap.")
         
         # --- GUARDRAIL: Fix Calendar ID Truncation ---
-        if "calendar_id" in parsed.proposed_action.args:
+        if parsed.proposed_action and "calendar_id" in parsed.proposed_action.args:
             cal_id = parsed.proposed_action.args["calendar_id"]
             # Check if this ID is valid (exists in map values)
             # We need to flatten the map values to check existence
@@ -582,7 +624,7 @@ Intent: {intent}
                         break
         # -----------------------------------------------------------------
         # --- GUARDRAIL: Improve travel search specificity ---
-        if parsed.proposed_action.tool == "search_travel_info":
+        if parsed.proposed_action and parsed.proposed_action.tool == "search_travel_info":
             parsed.proposed_action.args = normalize_travel_search_query(
                 intent=intent,
                 last_user_message=last_user_message,
@@ -591,14 +633,35 @@ Intent: {intent}
         # -----------------------------------------------------------------
 
         from langchain_core.messages import ToolCall
-        tool_call = ToolCall(
-            name=parsed.proposed_action.tool,
-            args=parsed.proposed_action.args,
-            id="exec_" + str(len(messages)),
-        )
-        return {"messages": [AIMessage(content="", tool_calls=[tool_call])]}
-    else:
-        return {"messages": [AIMessage(content="도구 명령을 생성하는 데 실패했습니다.")], "mode": "plan"}
+        
+        all_actions = []
+        if parsed.proposed_actions:
+            all_actions.extend(parsed.proposed_actions)
+        if parsed.proposed_action:
+            all_actions.append(parsed.proposed_action)
+        
+        logger.info(f"[EXECUTOR] all_actions count: {len(all_actions)}")
+
+        if not all_actions:
+             logger.warning("[EXECUTOR] No actions found in parsed response!")
+             return {"messages": [AIMessage(content="도구 명령을 생성하는 데 실패했습니다.")], "mode": "plan"}
+
+        tool_calls = []
+        for i, action in enumerate(all_actions):
+            tool_calls.append(ToolCall(
+                name=action.tool,
+                args=action.args,
+                id=f"exec_{len(messages)}_{i}"
+            ))
+        
+        logger.info(f"[EXECUTOR] Generated {len(tool_calls)} tool calls.")
+            
+        # If we successfully registered pending events, clear them from state
+        updates = {"messages": [AIMessage(content="", tool_calls=tool_calls)]}
+        if intent == 'Confirm and register all pending_calendar_events':
+            updates["pending_calendar_events"] = None
+            
+        return updates
 
 def route_after_router(state: AgentState):
     """Routes based on router's decision."""

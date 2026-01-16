@@ -11,4 +11,6 @@ class AgentState(TypedDict):
     planner_response: Optional[PlannerResponse]
     intent_summary: Optional[str]
     router_mode: Optional[str]
+    pending_calendar_events: Optional[list[dict]]  # New: for meeting summary confirmation
+    last_meeting_summary: Optional[str]           # New: for context
 
