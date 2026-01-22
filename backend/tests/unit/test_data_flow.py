@@ -24,7 +24,7 @@ async def test_planner_summarizes_tool_result():
     # We call the planner node directly for unit testing
     from app.agent.graph import planner
     state = {"messages": messages, "router_mode": "complex"}
-    result = planner(state)
+    result = planner(state, {"configurable": {"thread_id": "test"}})
     
     ai_response = result["messages"][0].content
     print(f"\nPlanner Response: {ai_response}")

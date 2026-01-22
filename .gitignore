@@ -95,3 +95,5 @@ final_calendar_test_utf8.txt
 sequential_test_utf8.txt
 evaluation_results.json
 agents.config.json
+
+.agent

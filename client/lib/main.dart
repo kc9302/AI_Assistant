@@ -31,11 +31,7 @@ void main() {
             return ChatRepositoryImpl(baseUrl: baseUrl);
           },
         ),
-        ProxyProvider2<
-          ChatRepository,
-          LocalLlmRepository,
-          HybridRouter
-        >(
+        ProxyProvider2<ChatRepository, LocalLlmRepository, HybridRouter>(
           update: (context, remote, local, previous) => HybridRouter(
             remoteRepository: remote,
             localRepository: local,
@@ -59,7 +55,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'FunctionGemma Agent',
+      title: 'AI 비서',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(

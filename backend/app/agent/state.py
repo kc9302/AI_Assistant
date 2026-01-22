@@ -21,4 +21,7 @@ class AgentState(TypedDict):
     pending_calendar_events: Optional[list[dict]]
     last_meeting_summary: Optional[str]
     raw_meeting_notes: Optional[str] # New: Store raw text to avoid context loss
+    meeting_workflow_step: Optional[str] # New: 'summary', 'review', 'registration_in_progress', 'completed'
+    registration_results: Optional[list[dict]] # New: Store results of each event registration
+    verification_results: Optional[list[dict]] # New: Store results of deep verification
 

@@ -29,7 +29,7 @@ class ChatMessageWidget extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    "FunctionGemma",
+                    "AI 비서",
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.outline,
                       fontWeight: FontWeight.bold,

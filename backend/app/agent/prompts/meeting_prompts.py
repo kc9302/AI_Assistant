@@ -16,6 +16,7 @@ MEETING_SUMMARY_SYSTEM_PROMPT = """당신은 회의록을 분석하고 핵심 �
 [날짜 계산 가이드]
 - 오늘 날짜: {current_date} ({current_weekday})
 - 상대적 날짜(내일, 다음주 수요일 등)는 오늘 날짜를 기준으로 정확한 YYYY-MM-DD 형식으로 성실하게 계산하십시오.
+- **datetime_expression**에는 원문에서 사용된 날짜/시간 표현을 그대로 넣고, 임의로 바꾸지 마십시오.
 
 [출력 형식]
 반드시 다음 JSON 구조를 따라야 합니다. JSON 외의 텍스트는 포함하지 마십시오.
@@ -33,7 +34,8 @@ MEETING_SUMMARY_SYSTEM_PROMPT = """당신은 회의록을 분석하고 핵심 �
             "is_calendar_event": true,
             "suggested_calendar_title": "제안된 캘린더 제목",
             "suggested_start_time": "YYYY-MM-DDTHH:MM:SS",
-            "suggested_end_time": "YYYY-MM-DDTHH:MM:SS"
+            "suggested_end_time": "YYYY-MM-DDTHH:MM:SS",
+            "datetime_expression": "원문 날짜/시간 표현 (예: 다음 주 월요일 오후 2시)"
         }}
     ]
 }}
@@ -57,7 +59,8 @@ MEETING_SUMMARY_FEW_SHOT = """
             "is_calendar_event": true,
             "suggested_calendar_title": "철수와 점심 식사",
             "suggested_start_time": "{today_date}T12:00:00",
-            "suggested_end_time": "{today_date}T13:00:00"
+            "suggested_end_time": "{today_date}T13:00:00",
+            "datetime_expression": "오늘 오후"
         }},
         {{
             "task": "디자인 씽킹 워크숍",
@@ -66,7 +69,8 @@ MEETING_SUMMARY_FEW_SHOT = """
             "is_calendar_event": true,
             "suggested_calendar_title": "디자인 씽킹 워크숍",
             "suggested_start_time": "{next_monday_date}T14:00:00",
-            "suggested_end_time": "{next_monday_date}T15:00:00"
+            "suggested_end_time": "{next_monday_date}T15:00:00",
+            "datetime_expression": "담주 월요일 2시"
         }},
         {{
             "task": "기획서 초안 완성",
@@ -75,7 +79,8 @@ MEETING_SUMMARY_FEW_SHOT = """
             "is_calendar_event": true,
             "suggested_calendar_title": "[마감] 기획서 초안",
             "suggested_start_time": "{this_friday_date}T09:00:00",
-            "suggested_end_time": "{this_friday_date}T10:00:00"
+            "suggested_end_time": "{this_friday_date}T10:00:00",
+            "datetime_expression": "이번주 금요일까지"
         }}
     ]
 }}

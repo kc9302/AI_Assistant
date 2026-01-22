@@ -16,6 +16,7 @@ from app.tools.calendar import (
 from app.tools.memory_tools import memory_tools
 from app.tools.travel_tools import travel_tools
 from app.tools.meeting_tools import summarize_meeting_notes # Added
+from app.tools.calendar import verify_calendar_registrations # Added
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,8 @@ tools = [
     list_events,
     create_event,
     delete_event,
-    summarize_meeting_notes # Added
+    summarize_meeting_notes, # Added
+    verify_calendar_registrations # Added
 ] + memory_tools + travel_tools
 
 from langchain_core.output_parsers import PydanticOutputParser
@@ -35,11 +37,12 @@ from app.agent.schemas import PlannerResponse, ExecutorResponse, RouterResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 import time
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import json # Added import
 from app.core.google_auth import get_calendar_service # Added import
 from app.services.context_manager import context_manager # Added import
 from app.core.utils import extract_json # Added import
+from app.core.datetime_utils import now_kst
 
 TRAVEL_ROUTER_HINTS = (
     "osaka", "오사카", "간사이", "일본",
@@ -57,6 +60,14 @@ CALENDAR_ONLY_HINTS = (
     "오늘 일정", "내일 일정", "이번 주 일정", "주간 일정", "월간 일정",
     "today schedule", "tomorrow schedule", "weekly schedule",
 )
+CALENDAR_FORCE_HINTS = (
+    "일정", "캘린더", "스케줄", "미팅", "회의", "약속",
+    "schedule", "calendar", "meeting", "appointment",
+)
+CALENDAR_CREATE_HINTS = (
+    "추가", "등록", "만들", "잡아", "예약", "생성",
+    "add", "create", "book", "set up", "schedule",
+)
 
 def is_travel_query(message: str) -> bool:
     if not message:
@@ -70,6 +81,50 @@ def is_travel_query(message: str) -> bool:
     if has_calendar_hint and not has_travel_hint:
         return False
     return has_travel_hint
+
+def is_calendar_query(message: str) -> bool:
+    if not message:
+        return False
+    text = message.lower()
+    if any(hint in text for hint in CALENDAR_ONLY_HINTS):
+        return True
+    return any(hint in text for hint in CALENDAR_FORCE_HINTS)
+
+def is_calendar_create_query(message: str) -> bool:
+    if not message:
+        return False
+    text = message.lower()
+    return any(hint in text for hint in CALENDAR_CREATE_HINTS)
+
+def is_calendar_list_query(message: str) -> bool:
+    return is_calendar_query(message) and not is_calendar_create_query(message)
+
+def extract_calendar_name(message: str) -> str | None:
+    if not message:
+        return None
+    match = re.search(r"\[[^\]]+\]", message)
+    if match:
+        return match.group(0)
+    return None
+
+def calendar_intent_from_message(message: str) -> str:
+    text = (message or "").lower()
+    calendar_name = extract_calendar_name(message or "")
+    if "오늘" in text or "today" in text:
+        intent = "List events today"
+    elif "내일" in text or "tomorrow" in text:
+        intent = "List events tomorrow"
+    elif "모레" in text or "day after tomorrow" in text:
+        intent = "List events day after tomorrow"
+    elif "이번 주" in text or "이번주" in text or "this week" in text or "주간" in text or "weekly" in text:
+        intent = "List events this week"
+    elif "다음 주" in text or "다음주" in text or "next week" in text:
+        intent = "List events next week"
+    else:
+        intent = "List events"
+    if calendar_name:
+        intent += f" for calendar {calendar_name}"
+    return intent
 
 def normalize_travel_search_query(intent: str, last_user_message: str, args: dict) -> dict:
     """
@@ -136,10 +191,74 @@ def normalize_travel_search_query(intent: str, last_user_message: str, args: dic
                 args["query"] = f"{dest} flight time {query}"
     return args
 
+def normalize_list_events_dates(last_user_message: str, intent: str, args: dict) -> dict:
+    if not last_user_message and not intent:
+        return args
+    text = f"{last_user_message} {intent or ''}".lower()
+    has_explicit_date = bool(re.search(r"\b\d{4}-\d{2}-\d{2}\b", text)) or bool(
+        re.search(r"\d{1,2}\s*월\s*\d{1,2}\s*일", text)
+    )
+    if has_explicit_date:
+        return args
+
+    target_offset = None
+    if "오늘" in text or "today" in text:
+        target_offset = 0
+    elif "내일" in text or "tomorrow" in text:
+        target_offset = 1
+    elif "모레" in text or "day after tomorrow" in text:
+        target_offset = 2
+
+    if target_offset is None:
+        return args
+
+    current_kst = now_kst()
+    target_date = (current_kst + timedelta(days=target_offset)).date()
+    start_date = target_date.strftime("%Y-%m-%d")
+    end_date = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
+    if args.get("start_date") != start_date or args.get("end_date") != end_date:
+        logger.info(f"Guardrail corrected list_events dates to {start_date} -> {end_date}.")
+    args["start_date"] = start_date
+    args["end_date"] = end_date
+    return args
+
 def get_current_time_str():
-    kst = timezone(timedelta(hours=9))
-    now = datetime.now(kst)
-    return now.strftime('%Y-%m-%d %H:%M:%S %A')
+    current_kst = now_kst()
+    return current_kst.strftime('%Y-%m-%d %H:%M:%S %A')
+
+def get_date_references():
+    """Returns a formatted string of relative date references for prompts."""
+    current_kst = now_kst()
+    today_str = current_kst.strftime('%Y-%m-%d')
+    tomorrow_str = (current_kst + timedelta(days=1)).strftime('%Y-%m-%d')
+    day_after_tomorrow_str = (current_kst + timedelta(days=2)).strftime('%Y-%m-%d')
+    
+    # Calculate next week's dates (Monday to Sunday)
+    # weekday(): Monday=0, Tuesday=1, ..., Sunday=6
+    days_until_next_monday = (7 - current_kst.weekday()) if current_kst.weekday() != 0 else 7
+    next_monday = current_kst + timedelta(days=days_until_next_monday)
+    next_week_dates = {
+        "월요일": next_monday.strftime('%Y-%m-%d'),
+        "화요일": (next_monday + timedelta(days=1)).strftime('%Y-%m-%d'),
+        "수요일": (next_monday + timedelta(days=2)).strftime('%Y-%m-%d'),
+        "목요일": (next_monday + timedelta(days=3)).strftime('%Y-%m-%d'),
+        "금요일": (next_monday + timedelta(days=4)).strftime('%Y-%m-%d'),
+        "토요일": (next_monday + timedelta(days=5)).strftime('%Y-%m-%d'),
+        "일요일": (next_monday + timedelta(days=6)).strftime('%Y-%m-%d'),
+    }
+    
+    ref_str = f"""DATE REFERENCE (Use these for relative date queries):
+- 오늘 (Today): {today_str}
+- 내일 (Tomorrow): {tomorrow_str}
+- 2일 뒤 (2 days later): {day_after_tomorrow_str}
+- 다음 주 월요일 (Next Monday): {next_week_dates['월요일']}
+- 다음 주 화요일 (Next Tuesday): {next_week_dates['화요일']}
+- 다음 주 수요일 (Next Wednesday): {next_week_dates['수요일']}
+- 다음 주 목요일 (Next Thursday): {next_week_dates['목요일']}
+- 다음 주 금요일 (Next Friday): {next_week_dates['금요일']}
+- 다음 주 토요일 (Next Saturday): {next_week_dates['토요일']}
+- 다음 주 일요일 (Next Sunday): {next_week_dates['일요일']}"""
+    return ref_str
 
 # Setup parsers
 base_router_parser = PydanticOutputParser(pydantic_object=RouterResponse)
@@ -150,7 +269,7 @@ base_executor_parser = PydanticOutputParser(pydantic_object=ExecutorResponse)
 def fix_json_with_llm(json_str: str, error: str, parser):
     """Custom fallback fixer for malformed JSON using the 27B model."""
     logger.info("Attempting to fix malformed JSON with Remote LLM...")
-    llm = get_llm(model=settings.LLM_MODEL_PLANNER)
+    llm = get_llm(model=settings.LLM_MODEL_PLANNER, format="json")
     
     prompt = f"""The following text was expected to be a valid JSON but parsing failed. 
 Error: {error}
@@ -167,11 +286,12 @@ Please extract and fix the JSON. Respond ONLY with the fixed JSON object.
         logger.error(f"JSON Fixing failed: {e}")
         raise e
 
-def router_node(state: AgentState):
+def router_node(state: AgentState, config):
     """
-    Initial routing node. Tries Local (270M) first, falls back to Remote (27B).
+    Initial routing node.
     """
-    profile = memory_service.get_user_profile()
+    thread_id = config.get("configurable", {}).get("thread_id", "default")
+    profile = memory_service.get_user_profile(thread_id=thread_id)
     user_info = profile.get("user", {})
     facts = profile.get("facts", {})
     context_str = f"\nUser: {user_info}\nFacts: {facts}" if user_info or facts else ""
@@ -180,20 +300,25 @@ def router_node(state: AgentState):
     messages = state["messages"]
     last_user_message = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
     
-    system_prompt = f"""You are an AI Assistant Router. Categorize the user request into 'simple', 'complex', or 'answer'.
-{time_str}
-{context_str}
+    lower_user_message = last_user_message.lower()
+    if is_calendar_query(last_user_message) and not is_travel_query(last_user_message):
+        if not any(kw in lower_user_message for kw in ["회의록", "meeting notes", "transcript", "요약", "summary"]):
+            logger.info("Router short-circuit: calendar query -> simple")
+            return {"router_mode": "simple"}
 
-Respond ONLY in JSON. {base_router_parser.get_format_instructions()}
+    system_prompt = f"""[Identity]
+You are a STERN AI ROUTER. You ONLY output JSON. NO CHAT.
 
-- 'answer': General chat, greetings, questions about yourself, or questions that can be answered directly using 'User Facts' or 'Past Conversations'.
-- 'simple': A single, clear calendar action (e.g., "Add meeting", "List events").
-- 'complex': Requests requiring reasoning, multi-step actions, or searching deep into past session details.
+[Rules]
+1. Categorize request into:
+   - 'answer': Simple chat or Q&A using provided facts.
+   - 'simple': Single calendar action.
+   - 'complex': Reasoning or Meeting Summary.
+2. {time_str}
+3. {context_str}
 
-Example 1: "Hi" -> {{"mode": "answer", "reasoning": "Simple greeting"}}
-Example 2: "내 이름이 뭐야?" -> {{"mode": "answer", "reasoning": "Asking about personal info already in context"}}
-Example 3: "Create a meeting tomorrow at 3pm" -> {{"mode": "simple", "reasoning": "Single tool call"}}
-Example 4: "Check my schedule for next week and find a 1h slot for tennis" -> {{"mode": "complex", "reasoning": "Requires schedule analysis"}}
+[Output Format]
+{base_router_parser.get_format_instructions()}
 """
 
     llm = get_llm(model=settings.LLM_MODEL_ROUTER)
@@ -202,23 +327,29 @@ Example 4: "Check my schedule for next week and find a 1h slot for tennis" -> {{
     logger.info(f"Invoking Router ({settings.LLM_MODEL_ROUTER})...")
     start_t = time.time()
     try:
+        llm = get_llm(model=settings.LLM_MODEL_ROUTER)
+        prompt = [SystemMessage(content=system_prompt), HumanMessage(content=last_user_message)]
         response = llm.invoke(prompt)
         content = response.content
-        logger.debug(f"Raw Router Output: {content}")
         json_str = extract_json(content)
         if not json_str:
-             logger.warning("Router returned empty JSON. Defaulting to 'complex'.")
+             logger.warning("Router returned empty or invalid JSON. Defaulting to 'complex'. Content: " + str(content[:100]))
+             # Ensure we don't return an empty string/message
              return {"router_mode": "complex"}
         
         try:
             parsed = base_router_parser.parse(json_str)
         except Exception as parse_err:
+            logger.warning(f"Router JSON parse failed. Attempting fix... Error: {parse_err}")
             parsed = fix_json_with_llm(json_str, str(parse_err), base_router_parser)
                 
         logger.info(f"Router Decision: {parsed.mode} in {time.time()-start_t:.2f}s")
         if is_travel_query(last_user_message) and parsed.mode in ("answer", "simple"):
             logger.info("Router override: travel query -> complex")
             return {"router_mode": "complex"}
+        if is_calendar_query(last_user_message) and parsed.mode == "answer":
+            logger.info("Router override: calendar query -> simple")
+            return {"router_mode": "simple"}
         return {"router_mode": parsed.mode}
     except Exception as e:
         logger.error(f"Routing failed: {e}")
@@ -255,11 +386,22 @@ def _filter_travel_facts(facts: dict) -> dict:
     }
     return {k: v for k, v in facts.items() if k not in travel_keys}
 
+def _is_registration_confirmation(message: str) -> bool:
+    if not message:
+        return False
+    lowered = message.lower()
+    keywords = [
+        "등록", "진행", "해줘", "해주세요", "해 줘", "해 주세요",
+        "yes", "confirm", "ok", "okay"
+    ]
+    return any(k in lowered for k in keywords)
 
-def planner(state: AgentState):
+
+def planner(state: AgentState, config):
     """The planner node using Remote LLM with Structured Output."""
     from app.services.memory import memory_service
-    profile = memory_service.get_user_profile()
+    thread_id = config.get("configurable", {}).get("thread_id", "default")
+    profile = memory_service.get_user_profile(thread_id=thread_id)
     user_info = profile.get("user", {})
     facts = profile.get("facts", {})
     messages = state["messages"]
@@ -268,6 +410,26 @@ def planner(state: AgentState):
         facts = _filter_travel_facts(facts)
     context_str = f"\nUser Information: {json.dumps(user_info, ensure_ascii=False)}\nUser Preferences/Facts: {json.dumps(facts, ensure_ascii=False)}" if user_info or facts else ""
     time_str = f"Current Time(Asia/Seoul): {get_current_time_str()}"
+    date_ref_str = get_date_references()
+
+    pending_events = state.get("pending_calendar_events") or []
+    if state.get("meeting_workflow_step") == "review" and pending_events:
+        if _is_registration_confirmation(last_user_msg):
+            assistant_msg = "일정 등록을 진행할게요."
+            return {
+                "messages": [AIMessage(content=assistant_msg)],
+                "planner_response": PlannerResponse(
+                    mode="execute",
+                    assistant_message=assistant_msg,
+                    intent_description="Confirm and register all pending_calendar_events",
+                    needs_confirmation=False,
+                    language="ko",
+                ),
+                "mode": "execute",
+                "intent_summary": "Confirm and register all pending_calendar_events",
+                "needs_confirmation": False,
+                "pending_calendar_events": pending_events,
+            }
     
     # Check if we just came from a tool execution
     has_tool_result = any(isinstance(m, AIMessage) and m.tool_calls for m in reversed(messages))
@@ -310,7 +472,8 @@ def planner(state: AgentState):
                         "intent_summary": "Meeting summary confirmation",
                         "needs_confirmation": True,
                         "pending_calendar_events": events,
-                        "last_meeting_summary": summary_text
+                        "last_meeting_summary": summary_text,
+                        "meeting_workflow_step": "review"
                     }
                 else:
                     # FALLBACK: If tool result is empty or not helpful, explain and ask for natural answer
@@ -328,76 +491,64 @@ def planner(state: AgentState):
             except Exception as e:
                 logger.error(f"Error parsing meeting summary result: {e}")
 
-        # Final Fallback for ALL tool results
-        logger.info(f"Summarizing tool result for user...")
-        summary_prompt = [
-            SystemMessage(content="You are an AI assistant. Summarize the tool result below for the user. DO NOT output JSON. Use natural Korean. If the result is a meeting summary with calendar events, explain what was found and ask for confirmation."),
-            HumanMessage(content=f"Tool: {last_tool_msg.name}\nOutput: {str(last_tool_msg.content)}")
-        ]
-        summary_res = get_llm().invoke(summary_prompt)
-        return {
-            "messages": [summary_res],
-            "mode": "plan",
-            "intent_summary": f"Summarize {last_tool_msg.name}"
-        }
+        # Fast-Path: If tool result is meeting summary, the assistant_msg is already well-formatted.
+        # Just use it directly instead of calling LLM again for a generic summary.
+        if last_tool_msg.name == "summarize_meeting_notes":
+            # (Handled in the block above already)
+            pass
+        else:
+            logger.info(f"Summarizing tool result for user...")
+            # Use a simple template-based summary if possible, or a very short LLM call
+            summary_prompt = [
+                SystemMessage(content="Summarize this tool result for the user in 1-2 friendly Korean sentences. NO JSON. IMPORTANT: Keep the original event summaries EXACTLY as they are (e.g., preserve brackets like [MemberName])."),
+                HumanMessage(content=f"Tool: {last_tool_msg.name}\nOutput: {str(last_tool_msg.content)}")
+            ]
+            summary_res = get_llm().invoke(summary_prompt)
+            return {
+                "messages": [summary_res],
+                "mode": "plan",
+                "intent_summary": f"Summarize {last_tool_msg.name}"
+            }
     
-    logger.info(f"Invoking Remote Planner ({settings.LLM_MODEL_PLANNER}) - Flexible JSON Mode")
-    remote_llm = get_llm(model=settings.LLM_MODEL_PLANNER, format="") # Disable Ollama strict JSON mode
+    logger.info(f"Invoking Remote Planner ({settings.LLM_MODEL_PLANNER}) - JSON Mode")
+    remote_llm = get_llm(model=settings.LLM_MODEL_PLANNER, format="json", is_complex=True) # Enable Dual GPU for Reasoning
     # structured_llm = remote_llm.with_structured_output(PlannerResponse) # Removed for OSS compatibility
     
-    system_prompt = f"""You are a Versatile AI Assistant Planner. 
-{time_str}
-{context_str}
+    system_prompt = f"""[Identity]
+You are a PROFESSIONAL PLANNER. YOU ONLY OUTPUT JSON.
 
-Analyze the conversation and determine the next step:
-1. 'plan': Respond directly to the user (chat, greeting, answering from 'User Facts'/'Past Conversations') or ask for missing information.
-2. 'execute': Perform a specific tool action (calendar operations or retrieving detailed session history).
+[Task]
+1. Respond to user or decide to execute a tool.
+2. Modes: 'plan' (direct answer), 'execute' (need tool).
+3. {time_str}
+4. {date_ref_str}
+5. {context_str}
 
-Use 'plan' if you can answer the user's question directly using the provided 'User Facts' or 'Past Conversations' summaries.
-Only use 'execute' if you strictly need a tool to fulfill the request.
+[Tools]
+{[t.name for t in tools]}
 
-CRITICAL CALENDAR RULE:
-- For ALL requests to see, check, or list the schedule (today, tomorrow, or any date), you MUST set 'mode': 'execute' to check the live calendar. 
-- DO NOT assume you know the schedule from past turns or facts.
-- ONLY use 'plan' for schedule queries IF you are summarizing a tool result that was JUST executed in the current turn.
+[Recent Memory]
+- Facts: {json.dumps(facts, ensure_ascii=False)}
+- History: {json.dumps(profile.get("history", []), ensure_ascii=False)}
 
-Available tools: {[t.name for t in tools]}
+[Crucial Rules]
+- When extracting calendar events, ALWAYS use absolute dates (YYYY-MM-DD) in the 'intent_description' to help the Executor. Use the 'Current Time' below as reference.
+- Meeting Notes -> MUST set 'mode': 'execute' and 'intent_description': 'Summarize meeting and extract calendar events'.
+- Calendar Queries -> MUST set 'mode': 'execute'.
+- Respond in {state.get("language", "Korean")}.
+- When describing a successful registration, say ONLY something like "[Event Name]을(를) [Calendar Name]에 [Time]에 추가했습니다." (No "Double-checked", no technical details).
+- **REGISTRATION STATUS**: NEVER claim "I have registered" or "Added to calendar" until you see a `ToolMessage` with `status: success` from `create_event`.
+- **WORKFLOW**: Current Meeting Workflow Step: {state.get('meeting_workflow_step', 'None')}. 
+    - If 'review', use a numbered list for events (e.g., "1. [Meeting] at 10:00") and ask "Would you like to register all, or just specific ones?".
+    - If user says "Proceed" or "Yes" during 'review', set `mode`: 'execute' and `intent_description`: 'Confirm and register all pending_calendar_events'.
+    - If 'registration_in_progress', you MUST execute `verify_calendar_registrations` with the current thread_id.
+    - If tool result from `verify_calendar_registrations` is present, summarize ALL results (요약 + 등록 결과 + Deep Verified 상태) and set `meeting_workflow_step` to 'completed'.
+- **CALENDAR LIST**: When summarizing `list_events`, DO NOT summarize. Output the list of events EXACTLY as they appear in the tool result. Keep all brackets like `[Name]` and all prefixes. DO NOT change a single character of the event summaries.
+- **STRICT DATE FILTERING**: If the user asks for "today" (오늘) or a specific date, IGNORE any item in the tool result that does not match that specific date. For example, if today is 2026-01-22 and the tool result contains 2026-01-23, EXCLUDE it from your summary.
+- **CLEAN UI**: NEVER show `eventId` or `calendar_id` in the `assistant_message`.
 
-LANGUAGE RULES:
-- If the user's latest query is in Korean, you MUST set 'language': 'ko' and respond in Korean.
-- If the user's latest query is in English, you MUST set 'language': 'en' and respond in English.
-- This applies STRICTLY to the 'assistant_message' field.
-
-TEMPORAL REASONING:
-- In 'intent_description', ALWAYS convert relative date terms (tomorrow, next Wednesday, 2 days later) into absolute YYYY-MM-DD format based on the 'Current Time' provided.
-- Example: If today is 2026-01-07 and user says "2 days later", 'intent_description' should contain "2026-01-09".
-
-LONG-TERM KNOWLEDGE:
-- User Facts: {json.dumps(facts, ensure_ascii=False)}
-- Past Conversations (Summaries): {json.dumps(profile.get("history", []), ensure_ascii=False)}
-
-SELECTIVE MEMORY & KNOWLEDGE RETRIEVAL RULES:
-1. If the request is about your upcoming Osaka trip and the current context lacks details (e.g., flight times, hotel names, specific itinerary), use 'execute' and call 'search_travel_info'.
-2. If the request requires specific details from a past conversation (e.g., "What was the name of the place we talked about?"), set 'mode': 'execute' and call 'retrieve_past_session'.
-3. If the user provides meeting notes (e.g., transcript, bullet points) AND asks for a summary or to register schedules, you MUST set 'mode': 'execute' and 'intent_description': 'Summarize meeting and extract calendar events'. DO NOT summarize it yourself in 'assistant_message'.
-4. If 'User Facts', 'Past Conversations' summaries, or search results already provide enough context, do NOT call tools. Just respond.
-5. Use 'search_travel_info' for external travel documents, and 'retrieve_past_session' for specific past chats.
-
-EXAMPLES OF SEARCH DECISIONS:
-- User: "When is my flight to Osaka?" -> Mode: 'execute', Tool: 'search_travel_info', Intent: "Check flight schedule to Osaka"
-- User: "Where is my hotel?" -> Mode: 'execute', Tool: 'search_travel_info', Intent: "Check hotel address in Osaka"
-- User: "What did we say about the budget last time?" -> Mode: 'execute', Tool: 'retrieve_past_session', Intent: "Fetch previous chat about budget"
-- User: "Hi there!" -> Mode: 'plan', message: "Hello! How can I help you today?"
-
-CONFIRMATION HANDLING:
-- If the user is responding to a question about registering events from a meeting summary:
-    - If they say "Yes", "응", "그래", "해줘", "등록해줘" or similar: set 'mode': 'execute' and 'intent_description': 'Confirm and register all pending_calendar_events'.
-    - If they say "No", "아니", "하지마" or similar: set 'mode': 'plan' and 'assistant_message': '알겠습니다. 일정을 등록하지 않았습니다.'
-
-EXAMPLES OF CONFIRMATION DECISIONS:
-- User: "응" (after summary) -> Mode: 'execute', Intent: "Confirm and register all pending_calendar_events"
-- User: "좋아 등록해줘" -> Mode: 'execute', Intent: "Confirm and register all pending_calendar_events"
-- User: "아니 됐어" -> Mode: 'plan', Assistant: "알겠습니다. 일정을 등록하지 않았습니다."
+[Output Format]
+{base_planner_parser.get_format_instructions()}
 """
     # If we have tool results, the planner must likely summarize (mode='plan')
     if is_current_tool_result:
@@ -414,7 +565,8 @@ EXAMPLES OF CONFIRMATION DECISIONS:
     system_prompt += "\n\nFINAL COMMAND: Ensure 'language' matches the user's language and 'assistant_message' is in THAT language."
 
     # Inject Recent Events Context
-    recent_events = context_manager.get_recent_events(state.get("configurable", {}).get("thread_id", "default"))
+    thread_id = config.get("configurable", {}).get("thread_id", "default")
+    recent_events = context_manager.get_recent_events(thread_id)
     if recent_events:
         recent_events_str = "\n".join([f"- ID: {e['event_id']}, Summary: {e['summary']}, Created: {e['created_at']}" for e in recent_events])
         system_prompt += f"\n\n[RECENTLY CREATED EVENTS (Use these IDs for deletion/updates)]:\n{recent_events_str}\n"
@@ -427,6 +579,7 @@ EXAMPLES OF CONFIRMATION DECISIONS:
     # Add a final context-aware language hint
     is_ko = any(ord(char) > 0x1100 for char in last_user_msg)
     lang_hint = "Korean" if is_ko else "English"
+    language_code = "ko" if is_ko else "en"
     prompt_messages.append(HumanMessage(content=f"[SYSTEM HINT: Output language must be {lang_hint}. OUTPUT JSON ONLY.]"))
     
     logger.info(f"Submitting to Remote Planner...")
@@ -438,14 +591,33 @@ EXAMPLES OF CONFIRMATION DECISIONS:
         json_str = extract_json(content)
         if not json_str:
             logger.error(f"Planner failed to find JSON in response: {content}")
-            raise ValueError("Planner returned empty or invalid JSON string.")
+            json_str = content
 
         try:
             parsed = base_planner_parser.parse(json_str)
         except Exception as parse_err:
             logger.warn(f"Planner JSON parse failed: {parse_err}. Raw content: {json_str}. Attempting fix...")
-            parsed = fix_json_with_llm(json_str, str(parse_err), base_planner_parser)
+            
+            # FALLBACK for Deletion: If parsing fails but user wants deletion, force a delete action
+            if any(kw in last_user_msg for kw in ["삭제", "취소", "delete", "cancel", "remove"]):
+                logger.info("Planner fallback: Deletion intent detected despite parse failure. Forcing 'execute' mode.")
+                parsed = PlannerResponse(
+                    mode="execute",
+                    intent_description="Delete the most recent event from memory.",
+                    assistant_message="네, 방금 등록한 일정을 삭제하도록 하겠습니다.",
+                    language=language_code
+                )
+            else:
+                parsed = fix_json_with_llm(json_str, str(parse_err), base_planner_parser)
         
+        if is_calendar_list_query(last_user_msg) and not is_current_tool_result:
+            logger.info("Planner override: calendar list query -> execute")
+            parsed.mode = "execute"
+            parsed.intent_description = calendar_intent_from_message(last_user_msg)
+            parsed.assistant_message = "일정을 확인할게요." if is_ko else "I'll check your schedule."
+            parsed.language = language_code
+            parsed.needs_confirmation = False
+
         # If the model still tries to execute despite having results, and it's a simple list, force plan
         if is_current_tool_result and parsed.mode == "execute":
              logger.warn("Model attempted to execute again immediately after tool call. Forcing 'plan' mode to avoid loop.")
@@ -465,8 +637,16 @@ EXAMPLES OF CONFIRMATION DECISIONS:
         
         # If mode is execute, we don't want to show the assistant's internal reasoning/draft to the user.
         final_assistant_msg = parsed.assistant_message
+        
+        # UI Policy: Simple registration message
+        if "추가했습니다" in final_assistant_msg and ("Double" in final_assistant_msg or "Verified" in final_assistant_msg):
+            # Clean up if the model still outputs verify text
+            import re
+            final_assistant_msg = re.sub(r"\(Double-checked.*?\)", "", final_assistant_msg).strip()
+            final_assistant_msg = re.sub(r"\(Verified.*?\)", "", final_assistant_msg).strip()
+
         updates = {
-            "messages": [AIMessage(content="")], # Clear for execute mode
+            "messages": [AIMessage(content=final_assistant_msg)], 
             "planner_response": parsed,
             "mode": parsed.mode,
             "intent_summary": parsed.intent_description,
@@ -504,12 +684,10 @@ EXAMPLES OF CONFIRMATION DECISIONS:
 def executor_node(state: AgentState, config):
     intent = state.get("intent_summary") or next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "List my events today")
     messages = state["messages"]
+    messages = state["messages"]
     last_user_message = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
-    kst = timezone(timedelta(hours=9))
-    now_kst = datetime.now(kst)
-    today_str = now_kst.strftime('%Y-%m-%d')
-    tomorrow_str = (now_kst + timedelta(days=1)).strftime('%Y-%m-%d')
-    day_after_tomorrow_str = (now_kst + timedelta(days=2)).strftime('%Y-%m-%d')
+    
+    date_ref_str = get_date_references()
 
     # Generate tool signatures
     tool_signatures = []
@@ -541,10 +719,7 @@ def executor_node(state: AgentState, config):
     system_prompt = f"""You are a Tool-Calling Expert. Generate the exact tool call for the intent.
 Current Time(Asia/Seoul): {get_current_time_str()}
 
-DATE REFERENCE (Use these for relative date queries):
-- 오늘 (Today): {today_str}
-- 내일 (Tomorrow): {tomorrow_str}
-- 2일 뒤 (2 days later): {day_after_tomorrow_str}
+{date_ref_str}
 
 Available tools:
 {tool_sigs_str}
@@ -555,12 +730,26 @@ CRITICAL RULES FOR ARGUMENTS:
     - **Verify the ID matches the mapping EXACTLY. Do NOT truncate the domain (e.g., keep '@group.calendar.google.com').**
 - ALWAYS use 'summary' for the event title, NEVER 'subject' or 'title'.
 
+CALENDAR SELECTION RULES:
+- **list_events**: 
+    - **CRITICAL**: To view ALL calendars, DO NOT include 'calendar_id' in the arguments. Omit it entirely.
+    - Only specify 'calendar_id' if the user explicitly mentions a specific calendar name (e.g., "[WS] Inc.", "work calendar").
+    - Examples:
+        - "오늘 일정 알려줘" → {{"start_date": "...", "end_date": "..."}} (NO calendar_id)
+        - "[WS] Inc. 캘린더의 일정 보여줘" → {{"start_date": "...", "end_date": "...", "calendar_id": "wickedstorm.kr@gmail.com"}}
+- **create_event**:
+    - If user mentions a specific calendar, use that calendar_id.
+    - Otherwise, use 'primary' or let Guardrail handle it.
+
 TEMPORAL RULES:
 - ALWAYS use the absolute YYYY-MM-DD from the 'DATE REFERENCE' above for 'start_date' and 'end_date'.
-- For a single day view, 'end_date' MUST be 'start_date' + 1 day.
+- For a single day view (e.g., "today", "tomorrow"), 'start_date' MUST be that day and 'end_date' MUST be 'start_date' + 1 day (the next day 00:00:00). This ensures the tool correctly filters for that specific day.
 
 EVENT RULES:
-- 'create_event': Use 'summary' (Title), 'start_time' (ISO), 'end_time' (ISO).
+- 'create_event': Use 'summary', 'start_time', 'end_time', 'calendar_id', 'description', 'location'.
+    - **CRITICAL**: Use ISO 8601 format for times (e.g., '2026-01-08T10:00:00').
+    - **RELATIVE DATES**: Use the 'DATE REFERENCE' table provided above.
+        - Always double-check that the calculated date is in the FUTURE.
 - 'delete_event': Use 'event_id'.
     - **CRITICAL**: 'event_id' is NOT the same as 'calendar_id'.
     - **NEVER** use an email-like string (e.g., '...@group.calendar.google.com') as an 'event_id'.
@@ -569,14 +758,14 @@ EVENT RULES:
 EXAMPLES:
 1. Intent: "내일 오전 10시에 '회의' 일정 추가해줘"
    Response: {{"proposed_action": {{"tool": "create_event", "args": {{"summary": "회의", "start_time": "2026-01-08T10:00:00Z", "end_time": "2026-01-08T11:00:00Z"}}}}, "reasoning": "Create event as requested."}}
-2. Intent: "'팀 점심' 일정 취소해줘"
-   Response: {{"proposed_action": {{"tool": "delete_event", "args": {{"event_id": "CAL_EVENT_123"}}}}, "reasoning": "Delete the specific event."}}
-3. Intent: "2026-01-09 일정 보여줘" (Show schedule for Jan 9th)
-   Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-09", "end_date": "2026-01-10"}}}}, "reasoning": "List events for a specific date."}}
-4. Intent: "내일 일정 보여줘" (Show tomorrow's schedule)
-   Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-08", "end_date": "2026-01-09"}}}}, "reasoning": "Calculate tomorrow's date (today+1) and list."}}
-5. Intent: "2일 뒤 일정 보여줘"
-   Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-09", "end_date": "2026-01-10"}}}}, "reasoning": "Calculate date (today+2) and list."}}
+2. Intent: "오늘 일정 보여줘"
+   Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-16", "end_date": "2026-01-17"}}}}, "reasoning": "List all events for today."}}
+3. Intent: "[WS] Inc. 캘린더 일정 보여줘"
+   Response: {{"proposed_action": {{"tool": "list_events", "args": {{"start_date": "2026-01-16", "end_date": "2026-01-17", "calendar_id": "wickedstorm.kr@gmail.com"}}}}, "reasoning": "Specified calendar."}}
+4. Intent: "방금 만든 일정 삭제해줘"
+   Response: {{"proposed_action": {{"tool": "delete_event", "args": {{}}}}, "reasoning": "Delete the most recent event from memory."}}
+5. Intent: "그거 취소해줘"
+   Response: {{"proposed_action": {{"tool": "delete_event", "args": {{}}}}, "reasoning": "Referring to previous event. System will fill ID from context."}}
 
 6. Intent: "Summarize meeting and extract calendar events" (based on provided notes)
    Response: {{"proposed_action": {{"tool": "summarize_meeting_notes", "args": {{"meeting_notes": "FULL_TEXT_FROM_HISTORY"}}}}, "reasoning": "Extract structured data from the meeting history."}}
@@ -633,7 +822,7 @@ CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you
     system_prompt += f"\n\nRESPONSE FORMAT:\nRespond ONLY in valid JSON. \n{base_executor_parser.get_format_instructions()}"
 
     executor_model = settings.LLM_MODEL_EXECUTOR or settings.LLM_MODEL_PLANNER
-    llm = get_llm(model=executor_model, format="") # Disable Ollama strict JSON mode
+    llm = get_llm(model=executor_model, format="json", is_complex=True) # Enable Dual GPU for Tool Logic
     prompt = [SystemMessage(content=system_prompt), HumanMessage(content=f"Follow intent: {intent}")]
     
     logger.info(f"Invoking Remote Executor ({executor_model}) - Prompt Length: {len(system_prompt)}")
@@ -643,7 +832,7 @@ CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you
         content = response.content
         json_str = extract_json(content)
         if not json_str:
-             raise ValueError("Executor returned empty or invalid JSON string.")
+             json_str = content
         
         try:
             parsed = base_executor_parser.parse(json_str)
@@ -659,9 +848,14 @@ CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you
         # This implies the return was meant to be after the guardrails.
         # I will keep the guardrails and toolcall creation, and move the return to the end of the function.
     except Exception as e:
-        logger.error(f"Executor failed: {e}")
-        friendy_msg = "죄송합니다. 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
-        return {"messages": [AIMessage(content=friendy_msg)], "mode": "plan"}
+        logger.error(f"Executor failed with error type {type(e).__name__}: {e}")
+        # Re-raise the exception to trigger the retry logic in main.py
+        # Only catch and return friendly message if we're sure it's not a temporary GPU/Model issue
+        if "rate limit" in str(e).lower() or "timeout" in str(e).lower() or "connection" in str(e).lower():
+            raise e # Let main.py handle the retry
+        
+        # If it's a persistent logic error, we still want to inform the user but maybe still retry once
+        raise e 
 
     if parsed:
         # --- GUARDRAIL: Fix ID Hallucination (Calendar ID vs Event ID) ---
@@ -711,32 +905,153 @@ CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you
                 args=parsed.proposed_action.args,
             )
         # -----------------------------------------------------------------
+        # --- GUARDRAIL: Match calendar name from user request ---
+        if parsed.proposed_action and parsed.proposed_action.tool == "create_event":
+            # Check if user mentioned a specific calendar name in their request
+            matched_calendar = None
+            for cal_name, cal_id in calendar_name_to_id_map.items():
+                # Check both in the user message and the intent
+                if cal_name in last_user_message or cal_name in intent:
+                    matched_calendar = (cal_name, cal_id)
+                    logger.info(f"Guardrail detected calendar mention: '{cal_name}' in user request")
+                    break
+            
+            if matched_calendar:
+                cal_name, cal_id = matched_calendar
+                parsed.proposed_action.args["calendar_id"] = cal_id
+                logger.info(f"Guardrail overriding calendar_id: '{cal_name}' -> {cal_id}")
+            else:
+                # If no specific calendar mentioned, check if there's already a calendar_id set
+                current_cal_id = parsed.proposed_action.args.get("calendar_id", "primary")
+                logger.info(f"No calendar mentioned in request. Using: {current_cal_id}")
+        # -----------------------------------------------------------------
 
         from langchain_core.messages import ToolCall
         
         all_actions = []
         if parsed.proposed_actions:
             all_actions.extend(parsed.proposed_actions)
-        if parsed.proposed_action:
+        elif parsed.proposed_action:
             all_actions.append(parsed.proposed_action)
         
         logger.info(f"[EXECUTOR] all_actions count: {len(all_actions)}")
+
+        for action in all_actions:
+            if action.tool == "list_events":
+                action.args = normalize_list_events_dates(last_user_message, intent, action.args)
 
         if not all_actions:
              logger.warning("[EXECUTOR] No actions found in parsed response!")
              return {"messages": [AIMessage(content="도구 명령을 생성하는 데 실패했습니다.")], "mode": "plan"}
 
-        # --- TASK-DRAIVEN OVERRIDE: Force [WS] Inc. for meeting registrations ---
+        # First, determine if user mentioned a specific calendar
+        user_specified_calendar_id = None
+        lower_user_msg = last_user_message.lower()
+        lower_intent = intent.lower()
+        
+        for cal_name, cal_id in calendar_name_to_id_map.items():
+            cal_name_lower = cal_name.lower()
+            if cal_name_lower in lower_user_msg or cal_name_lower in lower_intent:
+                user_specified_calendar_id = cal_id
+                logger.info(f"User specified calendar detected in batch (case-insensitive): '{cal_name}' -> {cal_id}")
+                break
+        
+        # Special case: Meeting registrations default to [WS] Inc. if no other calendar specified
         ws_calendar_id = calendar_name_to_id_map.get("[WS] Inc.")
         is_meeting_reg = (intent == 'Confirm and register all pending_calendar_events') or ("Summarize meeting" in intent)
         
+        logger.info(f"CALENDAR_MAP: {json.dumps(calendar_name_to_id_map, ensure_ascii=False)}")
         tool_calls = []
         for i, action in enumerate(all_actions):
-            # Apply override if it's a creation event and we have the target calendar ID
-            if action.tool == "create_event" and is_meeting_reg and ws_calendar_id:
-                action.args["calendar_id"] = ws_calendar_id
-                logger.info(f"Overriding calendar_id to '[WS] Inc.' ({ws_calendar_id}) for meeting event.")
+            # Apply calendar_id logic for create_event
+            if action.tool == "create_event":
+                logger.info(f"[Action {i}] Original args: {action.args}")
+                if user_specified_calendar_id:
+                    # User explicitly mentioned a calendar - use it
+                    action.args["calendar_id"] = user_specified_calendar_id
+                    logger.info(f"[Action {i}] Overriding with user-specified calendar: {user_specified_calendar_id}")
+                elif is_meeting_reg and ws_calendar_id:
+                    # Meeting registration without explicit calendar - default to [WS] Inc.
+                    action.args["calendar_id"] = ws_calendar_id
+                    logger.info(f"[Action {i}] Meeting registration - defaulting to '[WS] Inc.' ({ws_calendar_id})")
+                else:
+                    # No special handling - keep whatever the LLM decided (or default to primary)
+                    current_cal = action.args.get("calendar_id", "primary")
+                    logger.info(f"[Action {i}] No override needed. Using: {current_cal}")
+
+                # --- DATE CORRECTION LOGIC ---
+                # Force override date if user explicitly mentioned "Next Week Day"
+                # This fixes LLM hallucination where it ignores the cheat sheet.
+                current_kst = now_kst()
                 
+                # Re-calculate next week dates locally to be 100% sure
+                days_until_next_monday = (7 - current_kst.weekday()) if current_kst.weekday() != 0 else 7
+                next_monday = current_kst + timedelta(days=days_until_next_monday)
+                next_week_map = {
+                    "월요일": next_monday,
+                    "화요일": next_monday + timedelta(days=1),
+                    "수요일": next_monday + timedelta(days=2), # This will be 21st if today is 16th (Fri) -> Mon(19) -> Wed(21)
+                    "목요일": next_monday + timedelta(days=3),
+                    "금요일": next_monday + timedelta(days=4),
+                    "토요일": next_monday + timedelta(days=5),
+                    "일요일": next_monday + timedelta(days=6),
+                }
+
+                user_msg_lower = last_user_message.lower()
+                for day_name, correct_date in next_week_map.items():
+                    # Patterns: "다음 주 수요일", "다음주 수요일"
+                    if f"다음 주 {day_name}" in last_user_message or f"다음주 {day_name}" in last_user_message:
+                        original_start = action.args.get("start_time", "")
+                        
+                        # Parse original time part (HH:MM:SS) if possible
+                        time_part = "10:00:00" # Default
+                        if "T" in original_start:
+                            time_part = original_start.split("T")[1]
+                        
+                        new_start = f"{correct_date.strftime('%Y-%m-%d')}T{time_part}"
+                        
+                        # Adjust end time accordingly (keep duration)
+                        original_end = action.args.get("end_time", "")
+                        if original_end and "T" in original_end:
+                             # Calculate duration from original
+                             try:
+                                 orig_s = datetime.fromisoformat(original_start.replace('Z', '+00:00'))
+                                 orig_e = datetime.fromisoformat(original_end.replace('Z', '+00:00'))
+                                 duration = orig_e - orig_s
+                                 new_end = (datetime.fromisoformat(new_start) + duration).isoformat()
+                             except:
+                                 # Fallback: 1 hour
+                                 new_end = (datetime.fromisoformat(new_start) + timedelta(hours=1)).isoformat()
+                        else:
+                             new_end = (datetime.fromisoformat(new_start) + timedelta(hours=1)).isoformat()
+
+                        action.args["start_time"] = new_start
+                        action.args["end_time"] = new_end
+                        logger.info(f"[Action {i}] DATE CORRECTION: 'Next {day_name}' detected. Forced date to {new_start[:10]}.")
+                        break
+
+                # Pass thread_id for verification
+                action.args["thread_id"] = thread_id
+                logger.info(f"[Action {i}] Final args to tool: {action.args}")
+
+            if action.tool == "delete_event":
+                if user_specified_calendar_id:
+                    action.args["calendar_id"] = user_specified_calendar_id
+                action.args.setdefault("thread_id", thread_id)
+
+            if action.tool == "delete_event":
+                # If ID is missing, try to fill from memory
+                if not action.args.get("event_id"):
+                    logger.info(f"[Action {i}] Empty delete_event - checking memory for thread_id={thread_id}")
+                    recent = context_manager.get_recent_events(thread_id, limit=1)
+                    if recent:
+                        action.args["event_id"] = recent[0]["event_id"]
+                        action.args["calendar_id"] = recent[0].get("calendar_id", "primary")
+                        logger.info(f"[Action {i}] Injected recent event from memory: {recent[0]['summary']} ({action.args['event_id']})")
+                    else:
+                        # Fallback: Pass thread_id to the tool itself for a search-based delete
+                        action.args["thread_id"] = thread_id
+                        logger.info(f"[Action {i}] No memory found. Passing thread_id to tool for search.")
             tool_calls.append(ToolCall(
                 name=action.tool,
                 args=action.args,
@@ -746,7 +1061,8 @@ CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you
         logger.info(f"[EXECUTOR] Generated {len(tool_calls)} tool calls.")
             
         # If we successfully registered pending events, clear them from state
-        updates = {"messages": [AIMessage(content="", tool_calls=tool_calls)]}
+        # Ensure we always have content even if tool_calls exist, to avoid "empty model output" errors
+        updates = {"messages": [AIMessage(content="일정 작업을 수행합니다...", tool_calls=tool_calls)]}
         if intent == 'Confirm and register all pending_calendar_events':
             updates["pending_calendar_events"] = None # Clear state
             
@@ -787,48 +1103,85 @@ def chatbot(state: AgentState):
     return {"messages": [response]}
 
 def tool_with_logging(state: AgentState, config):
-    """Execution node for tools with result logging."""
+    """Execution node for tools with result logging and state updates."""
     tool_node = ToolNode(tools)
     result = tool_node.invoke(state)
-    last_message = result["messages"][-1]
-    logger.info(f"Tool Execution Result: {str(last_message.content)[:500]}...") # Log first 500 chars
+    
+    # 1. Iterate through ALL tool messages generated in this step
+    # LangGraph result['messages'] contains the new ToolMessage objects
+    from langchain_core.messages import ToolMessage
+    new_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    
+    registration_results = state.get("registration_results") or []
+    verification_results = state.get("verification_results") or []
+    current_step = state.get("meeting_workflow_step", "None")
+    
+    thread_id = config.get("configurable", {}).get("thread_id", "default")
 
-    # --- Context Capture Hook ---
-    try:
-        if last_message.name == "create_event":
-            import json
-            content = last_message.content
-            # Verify it's a success JSON
+    def _resolve_calendar_id_from_tool_call(tool_call_id: str | None) -> str | None:
+        if not tool_call_id:
+            return None
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                for call in msg.tool_calls:
+                    if call.get("id") == tool_call_id:
+                        return call.get("args", {}).get("calendar_id")
+        return None
+
+    for tool_msg in new_messages:
+        logger.info(f"Processing Tool Result: {tool_msg.name}")
+        content = tool_msg.content
+        
+        # --- Handle create_event result ---
+        if tool_msg.name == "create_event":
             try:
                 data = json.loads(content)
-                if data.get("status") == "success" and "eventId" in data:
-                    thread_id = config.get("configurable", {}).get("thread_id", "default")
-                    
-                    # Try to get calendar_id from the tool call args
+                calendar_id = data.get("calendar_id") or data.get("calendarId")
+                if not calendar_id:
+                    calendar_id = _resolve_calendar_id_from_tool_call(getattr(tool_msg, "tool_call_id", None))
+                if not calendar_id:
                     calendar_id = "primary"
-                    try:
-                        # The last message in state is the AIMessage that triggered this tool execution
-                        if len(state["messages"]) >= 1:
-                             tool_msg = state["messages"][-1]
-                             if hasattr(tool_msg, "tool_calls") and tool_msg.tool_calls:
-                                 # Assume the first tool call corresponds to this result (simplified)
-                                 calendar_id = tool_msg.tool_calls[0]["args"].get("calendar_id", "primary")
-                    except Exception as e:
-                        logger.warn(f"Failed to extract calendar_id from tool call: {e}")
-
+                res_entry = {
+                    "summary": data.get("summary", "Unknown"),
+                    "status": data.get("status", "error"),
+                    "eventId": data.get("eventId"),
+                    "calendar_id": calendar_id,
+                    "error": data.get("error")
+                }
+                
+                if res_entry["status"] == "success":
+                    # Add to context memory for deletion/deep verification
                     context_manager.add_event(
                         thread_id=thread_id,
                         event_id=data["eventId"],
-                        summary=data.get("summary", "Unknown Event"),
+                        summary=data.get("summary", "Unknown"),
                         calendar_id=calendar_id
                     )
-            except json.JSONDecodeError:
-                pass # Not a JSON response, ignore
-    except Exception as e:
-        logger.error(f"Context Capture Failed: {e}")
-    # ----------------------------
+                
+                registration_results.append(res_entry)
+            except Exception as e:
+                logger.error(f"Failed to parse create_event result: {e}")
 
-    return result
+        # --- Handle verify_calendar_registrations result ---
+        elif tool_msg.name == "verify_calendar_registrations":
+            try:
+                data = json.loads(content)
+                verification_results = data.get("results", [])
+                logger.info(f"Verification completed: {len(verification_results)} items verified.")
+            except Exception as e:
+                logger.error(f"Failed to parse verification result: {e}")
+
+    # 2. Update workflow state
+    updates = {
+        "messages": result["messages"],
+        "registration_results": registration_results,
+        "verification_results": verification_results
+    }
+    
+    # If we just registered and verified, we might be 'completed'
+    # The planner will make the final call on 'completed', but we provide the data.
+    
+    return updates
 
 def get_graph(checkpointer=None):
     logger.info("--- get_graph with checkpointer support loaded. ---")

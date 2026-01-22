@@ -27,6 +27,18 @@ class OllamaProvider(LLMProvider):
         **kwargs: Any,
     ) -> ChatOllama:
         ollama_kwargs: dict[str, Any] = {}
+        
+        # Hardware acceleration: num_gpu
+        # If user explicitly passes num_gpu, use it. 
+        # Otherwise, check environment or defaults.
+        # -1 usually means "all layers to GPU" in Ollama settings, but for langchain-ollama it might vary.
+        # We will use the 'options' field for specific parameters like num_gpu.
+        options = kwargs.pop("options", {})
+        # Transfer common hardware/inference options from kwargs to options
+        for key in ["num_gpu", "num_ctx", "num_thread", "num_batch", "repeat_last_n", "repeat_penalty", "top_k", "top_p"]:
+            if key in kwargs:
+                options[key] = kwargs.pop(key)
+        
         if keep_alive is not None:
             ollama_kwargs["keep_alive"] = keep_alive
         elif settings.LLM_KEEP_ALIVE:
@@ -39,9 +51,10 @@ class OllamaProvider(LLMProvider):
         return ChatOllama(
             base_url=self._base_url,
             model=model,
-            temperature=0.0,
+            temperature=kwargs.pop("temperature", 0.0),
             format=model_format,
             ollama_kwargs=ollama_kwargs,
+            options=options,
             **kwargs,
         )
 

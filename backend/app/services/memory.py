@@ -3,7 +3,7 @@ import json
 import logging
 import asyncio
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from app.core.datetime_utils import now_kst
 from langchain_core.messages import BaseMessage, message_to_dict, messages_from_dict
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ class MemoryService:
 
     def save_session(self, thread_id: str, messages: List[BaseMessage]):
         """Saves current session messages to JSON in date-based directory."""
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = now_kst().strftime("%Y-%m-%d")
         daily_dir = os.path.join(SESSIONS_DIR, date_str)
         os.makedirs(daily_dir, exist_ok=True)
         
@@ -46,7 +46,7 @@ class MemoryService:
             data = [message_to_dict(m) for m in messages]
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({
-                    "updated_at": datetime.now().isoformat(),
+                    "updated_at": now_kst().isoformat(),
                     "messages": data
                 }, f, ensure_ascii=False, indent=2)
             logger.debug(f"Session {thread_id} saved to {date_str}.")
@@ -106,8 +106,8 @@ class MemoryService:
             return []
         return sorted([d for d in os.listdir(SESSIONS_DIR) if os.path.isdir(os.path.join(SESSIONS_DIR, d))], reverse=True)
 
-    def get_user_profile(self) -> Dict[str, Any]:
-        """Returns the long-term user profile."""
+    def get_user_profile(self, thread_id: Optional[str] = None) -> Dict[str, Any]:
+        """Returns the long-term user profile. Optional thread_id for session context."""
         try:
             with open(USER_PROFILE_PATH, "r", encoding="utf-8") as f:
                 profile = json.load(f)
@@ -117,23 +117,23 @@ class MemoryService:
             logger.error(f"Failed to load user profile: {e}")
             return {"patterns": [], "facts": {}, "history": []}
 
-    def update_user_profile(self, new_facts: Dict[str, Any]):
+    def update_user_profile(self, new_facts: Dict[str, Any], thread_id: Optional[str] = None):
         """Updates the persistent user profile facts."""
-        profile = self._normalize_profile(self.get_user_profile())
+        profile = self._normalize_profile(self.get_user_profile(thread_id=thread_id))
         profile["facts"].update(new_facts)
         self._save_profile(profile)
 
-    def update_user_info(self, new_info: Dict[str, Any]):
+    def update_user_info(self, new_info: Dict[str, Any], thread_id: Optional[str] = None):
         """Updates the persistent user information (name, calendars, etc.)."""
-        profile = self._normalize_profile(self.get_user_profile())
+        profile = self._normalize_profile(self.get_user_profile(thread_id=thread_id))
         profile["user"].update(new_info)
         self._save_profile(profile)
 
-    def add_user_pattern(self, pattern: str):
+    def add_user_pattern(self, pattern: str, thread_id: Optional[str] = None):
         """Adds a new pattern entry if it does not already exist."""
         if not pattern:
             return
-        profile = self._normalize_profile(self.get_user_profile())
+        profile = self._normalize_profile(self.get_user_profile(thread_id=thread_id))
         if pattern not in profile["patterns"]:
             profile["patterns"].append(pattern)
             self._save_profile(profile)
@@ -148,14 +148,14 @@ class MemoryService:
             existing.update({
                 "category": category,
                 "summary": summary,
-                "updated_at": datetime.now().isoformat()
+                "updated_at": now_kst().isoformat()
             })
         else:
             profile["history"].append({
                 "thread_id": thread_id,
                 "category": category,
                 "summary": summary,
-                "updated_at": datetime.now().isoformat()
+                "updated_at": now_kst().isoformat()
             })
         
         # Keep only last 20 summaries to save tokens later

@@ -42,7 +42,7 @@ class LocalLLMService {
     try {
       // final response = await _engine?.generate(prompt);
       // return response ?? "";
-      return "I am FunctionGemma (Local). I received: $prompt"; // Dummy response for now
+      return "저는 AI 비서 (로컬)입니다. 받은 메시지: $prompt"; // Dummy response for now
     } catch (e) {
       return "Error generating response: $e";
     }

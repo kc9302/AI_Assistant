@@ -140,7 +140,7 @@ async def chat(body: dict):
         return {"error": "Invalid input format. Expected 'message' field."}
         
     MAX_RETRIES = 1
-    timeout_seconds = 180 # 3 minutes
+    timeout_seconds = 120 # 2 minutes
     
     for attempt in range(MAX_RETRIES + 1):
         try:
@@ -171,6 +171,18 @@ async def chat(body: dict):
                 memory_service.save_session(thread_id, final_state["messages"])
                 asyncio.create_task(memory_analyzer.analyze_and_update(final_state["messages"]))
 
+            if settings.LLM_PROVIDER.lower() == "ollama":
+                async def _unload_after_response() -> None:
+                    try:
+                        await asyncio.sleep(120)
+                        from app.agent.llm import unload_model as unload_provider_model
+                        await asyncio.to_thread(unload_provider_model)
+                        logger.info("Ollama unload requested 120s after response.")
+                    except Exception as exc:
+                        logger.warning("Ollama unload failed after response: %s", exc)
+
+                asyncio.create_task(_unload_after_response())
+
             return {
                 "response": ai_message.content,
                 "mode": mode,
@@ -191,7 +203,7 @@ async def chat(body: dict):
                     logger.error(f"Failed to unload model during retry: {e}")
                 continue # Retry
             else:
-                return {"error": "Response took too long (over 3 mins). Please try again with a shorter request."}
+                return {"error": "Response took too long (over 2 mins). Please try again with a shorter request."}
                 
         except Exception as e:
             logger.exception(f"Graph execution failed for thread_id={thread_id} (Attempt {attempt+1})")
