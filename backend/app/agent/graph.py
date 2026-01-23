@@ -269,7 +269,7 @@ base_executor_parser = PydanticOutputParser(pydantic_object=ExecutorResponse)
 def fix_json_with_llm(json_str: str, error: str, parser):
     """Custom fallback fixer for malformed JSON using the 27B model."""
     logger.info("Attempting to fix malformed JSON with Remote LLM...")
-    llm = get_llm(model=settings.LLM_MODEL_PLANNER, format="json")
+    llm = get_llm(model=settings.LLM_MODEL_PLANNER, format="json", is_complex=True)
     
     prompt = f"""The following text was expected to be a valid JSON but parsing failed. 
 Error: {error}
@@ -302,7 +302,9 @@ def router_node(state: AgentState, config):
     
     lower_user_message = last_user_message.lower()
     if is_calendar_query(last_user_message) and not is_travel_query(last_user_message):
-        if not any(kw in lower_user_message for kw in ["회의록", "meeting notes", "transcript", "요약", "summary"]):
+        # Keywords that indicate we need complex reasoning/summary
+        complex_keywords = ["회의록", "녹취록", "정리", "요약", "meeting notes", "transcript", "summary", "action items"]
+        if not any(kw in lower_user_message for kw in complex_keywords):
             logger.info("Router short-circuit: calendar query -> simple")
             return {"router_mode": "simple"}
 
@@ -321,15 +323,16 @@ You are a STERN AI ROUTER. You ONLY output JSON. NO CHAT.
 {base_router_parser.get_format_instructions()}
 """
 
-    llm = get_llm(model=settings.LLM_MODEL_ROUTER)
     prompt = [SystemMessage(content=system_prompt), HumanMessage(content=last_user_message)]
     
     logger.info(f"Invoking Router ({settings.LLM_MODEL_ROUTER})...")
     start_t = time.time()
     try:
-        llm = get_llm(model=settings.LLM_MODEL_ROUTER)
-        prompt = [SystemMessage(content=system_prompt), HumanMessage(content=last_user_message)]
-        response = llm.invoke(prompt)
+        primary_llm = get_llm(model=settings.LLM_MODEL_ROUTER, format="json")
+        fallback_llm = get_llm(model=settings.LLM_MODEL_ROUTER, format="")
+        modern_llm = primary_llm.with_fallbacks([fallback_llm])
+        
+        response = modern_llm.invoke(prompt)
         content = response.content
         json_str = extract_json(content)
         if not json_str:
@@ -585,12 +588,26 @@ You are a PROFESSIONAL PLANNER. YOU ONLY OUTPUT JSON.
     logger.info(f"Submitting to Remote Planner...")
     start_t = time.time()
     try:
-        response = remote_llm.invoke(prompt_messages)
+        # Modern LangChain Pattern: Fallback from JSON mode to Normal mode automatically
+        # format="json" may fail or return empty on some local models. 
+        # .with_fallbacks handles the switch if the first call raises an exception.
+        primary_llm = get_llm(model=settings.LLM_MODEL_PLANNER, format="json", is_complex=True)
+        fallback_llm = get_llm(model=settings.LLM_MODEL_PLANNER, format="", is_complex=True)
+        
+        modern_llm = primary_llm.with_fallbacks([fallback_llm])
+        
+        response = modern_llm.invoke(prompt_messages)
         content = response.content
         
+        if not content or not content.strip():
+             # If even fallback returned empty, try one last time with fresh fallback instance
+             logger.warning("Modern LLM returned empty content. Final manual retry...")
+             response = fallback_llm.invoke(prompt_messages)
+             content = response.content
+
         json_str = extract_json(content)
         if not json_str:
-            logger.error(f"Planner failed to find JSON in response: {content}")
+            logger.warning(f"Planner returned non-JSON content. Using raw content for parsing.")
             json_str = content
 
         try:
@@ -599,7 +616,7 @@ You are a PROFESSIONAL PLANNER. YOU ONLY OUTPUT JSON.
             logger.warn(f"Planner JSON parse failed: {parse_err}. Raw content: {json_str}. Attempting fix...")
             
             # FALLBACK for Deletion: If parsing fails but user wants deletion, force a delete action
-            if any(kw in last_user_msg for kw in ["삭제", "취소", "delete", "cancel", "remove"]):
+            if last_user_msg and any(kw in last_user_msg for kw in ["삭제", "취소", "delete", "cancel", "remove"]):
                 logger.info("Planner fallback: Deletion intent detected despite parse failure. Forcing 'execute' mode.")
                 parsed = PlannerResponse(
                     mode="execute",
@@ -608,7 +625,16 @@ You are a PROFESSIONAL PLANNER. YOU ONLY OUTPUT JSON.
                     language=language_code
                 )
             else:
-                parsed = fix_json_with_llm(json_str, str(parse_err), base_planner_parser)
+                try:
+                    parsed = fix_json_with_llm(json_str, str(parse_err), base_planner_parser)
+                except:
+                    # Final fallback: if everything fails, return a plan mode response to avoid complete crash
+                    logger.error("All JSON parsing and fixing failed. Using emergency plan response.")
+                    parsed = PlannerResponse(
+                        mode="plan",
+                        assistant_message="죄송합니다. 요청을 이해했지만 처리하는 중에 기술적인 문제가 발생했습니다. (JSON 파싱 오류)",
+                        language=language_code
+                    )
         
         if is_calendar_list_query(last_user_msg) and not is_current_tool_result:
             logger.info("Planner override: calendar list query -> execute")
@@ -677,8 +703,13 @@ You are a PROFESSIONAL PLANNER. YOU ONLY OUTPUT JSON.
         updates["messages"] = [AIMessage(content=final_assistant_msg)]
         return updates
     except Exception as e:
-        logger.error(f"Planner error: {e}")
-        friendy_msg = "죄송합니다. 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
+        logger.error(f"Planner encounterd critical error: {type(e).__name__}: {e}")
+        # Log more context if possible
+        try:
+             logger.error(f"Last user message that caused error: {last_user_msg[:500]}...")
+        except: pass
+        
+        friendy_msg = "죄송합니다. 요청을 처리하는 중에 문제가 발생했습니다. (모델 응답 지연 또는 오류)"
         return {"messages": [AIMessage(content=friendy_msg)], "mode": "plan"}
 
 def executor_node(state: AgentState, config):
@@ -822,13 +853,17 @@ CRITICAL: If 'intent' is 'Confirm and register all pending_calendar_events', you
     system_prompt += f"\n\nRESPONSE FORMAT:\nRespond ONLY in valid JSON. \n{base_executor_parser.get_format_instructions()}"
 
     executor_model = settings.LLM_MODEL_EXECUTOR or settings.LLM_MODEL_PLANNER
-    llm = get_llm(model=executor_model, format="json", is_complex=True) # Enable Dual GPU for Tool Logic
+    
+    primary_llm = get_llm(model=executor_model, format="json", is_complex=True)
+    fallback_llm = get_llm(model=executor_model, format="", is_complex=True)
+    modern_llm = primary_llm.with_fallbacks([fallback_llm])
+    
     prompt = [SystemMessage(content=system_prompt), HumanMessage(content=f"Follow intent: {intent}")]
     
     logger.info(f"Invoking Remote Executor ({executor_model}) - Prompt Length: {len(system_prompt)}")
     logger.info(f"[DEBUG] executor_node - PENDING EVENTS in prompt: {json.dumps(pending_events, ensure_ascii=False)}")
     try:
-        response = llm.invoke(prompt)
+        response = modern_llm.invoke(prompt)
         content = response.content
         json_str = extract_json(content)
         if not json_str:

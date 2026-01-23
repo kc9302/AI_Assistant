@@ -100,3 +100,4 @@ agents.config.json
 temp_events.json
 backend/data/user_profile.json
 .gitignore
+user_profile.json

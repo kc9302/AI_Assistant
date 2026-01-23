@@ -56,7 +56,8 @@ def get_calendar_service():
         return None
     
     try:
-        service = build("calendar", "v3", credentials=creds)
+        # cache_discovery=False suppresses the 'file_cache is only supported with oauth2client<4.0.0' warning
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         return service
     except Exception as e:
         print(f"Error building service: {e}")
