@@ -23,6 +23,12 @@
     $env:PYTHONPATH="."
     python scripts/index_travel.py
     ```
+- **Q: "ERROR:__main__:Indexing failed: To log the progress of DirectoryLoader you need to install tqdm" 오류가 발생합니다.**
+  - **A:** `tqdm` 패키지가 의존성에 누락된 경우입니다. UV를 사용해서 패키지를 추가하세요:
+    ```powershell
+    uv add tqdm
+    ```
+    추가 후 서버를 재시작하면 정상적으로 인덱싱이 진행됩니다.
 - **Q: "Invalid JSON output" 또는 "OUTPUT_PARSING_FAILURE" 오류가 발생합니다.**
   - **A:** 사용 중인 모델이 구조화된 출력(Structured Output) 형식을 엄격히 지키지 못하는 경우입니다. 백엔드는 현재 `extract_json` 기능을 통해 이를 보정하고 있으며, **v1.3.1-fix부터는 빈 응답을 안전하게 처리하여 서버 크래시를 방지**합니다. 사용자에게는 "죄송합니다. 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."라는 친절한 메시지가 표시되며, 기술적인 오류 내용은 서버 로그에만 기록됩니다. 현상이 지속될 경우 `Prompt`에 더 명확한 지시를 주거나 모델을 `gpt-oss:20b`급 이상으로 업그레이드하는 것을 권장합니다.
 - **Q: Ollama와 LM Studio 중 무엇을 사용해야 하나요?**

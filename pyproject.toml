@@ -61,4 +61,5 @@ dependencies = [
     "faiss-cpu",
     "pytest",
     "pytest-asyncio",
+    "tqdm>=4.67.1",
 ]
